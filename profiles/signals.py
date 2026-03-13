@@ -8,4 +8,17 @@ User = get_user_model()
 @receiver(post_save, sender=User)
 def create_user_profile(sender, instance, created, **kwargs):
     if created:
-        Profile.objects.create(user=instance)
+        Profile.objects.create(
+            user=instance,
+            name=instance.full_name,
+            email=instance.email,
+        )
+
+@receiver(post_save, sender=User)
+def sync_profile_identity(sender, instance, **kwargs):
+
+    if hasattr(instance, "profile"):
+        profile = instance.profile
+        profile.name = instance.name
+        profile.email = instance.email
+        profile.save(update_fields=["name", "email"])
