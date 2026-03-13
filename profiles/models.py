@@ -2,31 +2,13 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from datetime import date
 
+from .constants import PROFILE_COMPLETION_FIELDS
+
 User = get_user_model()
 
 
-def profile_avatar_upload_path(instance, filename: str) -> str:
-    return f"profiles/{instance.user_id}/avatar/{filename}"
-
-
-
-
-PROFILE_COMPLETION_FIELDS = [
-    "gender",
-    "dob",
-    "location",
-    "current_weight_kg",
-    "current_height_cm",
-    "diet",
-    "religion",
-    "occupational_status",
-    "works_at",
-    "income_level",
-    "region",
-]
-
-
 class Profile(models.Model):
+
     user = models.OneToOneField(
         User,
         on_delete=models.CASCADE,
@@ -38,6 +20,7 @@ class Profile(models.Model):
     # -----------------------------
     name = models.CharField(max_length=255, blank=True)
     email = models.EmailField(blank=True)
+
     gender = models.CharField(max_length=50, blank=True)
     dob = models.DateField(null=True, blank=True)
     location = models.CharField(max_length=255, blank=True)
@@ -79,9 +62,99 @@ class Profile(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     # -----------------------------
-    # PROFILE COMPLETION LOGIC
+    # AGE
     # -----------------------------
-    def missing_completion_fields(self) -> list[str]:
+    @property
+    def age(self):
+        if not self.dob:
+            return None
+        today = date.today()
+        return (
+            today.year
+            - self.dob.year
+            - ((today.month, today.day) < (self.dob.month, self.dob.day))
+        )
+
+    # -----------------------------
+    # BMI
+    # -----------------------------
+    @property
+    def bmi(self):
+        if not self.current_weight_kg or not self.current_height_cm:
+            return None
+
+        height_m = self.current_height_cm / 100
+        return round(self.current_weight_kg / (height_m ** 2), 2)
+
+    # -----------------------------
+    # BMI CATEGORY
+    # -----------------------------
+    @property
+    def bmi_category(self):
+        bmi = self.bmi
+
+        if bmi is None:
+            return None
+        if bmi < 18.5:
+            return "Underweight"
+        if bmi < 25:
+            return "Normal"
+        if bmi < 30:
+            return "Overweight"
+        return "Obese"
+
+    # -----------------------------
+    # BMR
+    # -----------------------------
+    @property
+    def bmr(self):
+
+        if not self.current_weight_kg or not self.current_height_cm or not self.age:
+            return None
+
+        if self.gender.lower() == "male":
+            return (
+                10 * self.current_weight_kg
+                + 6.25 * self.current_height_cm
+                - 5 * self.age
+                + 5
+            )
+
+        return (
+            10 * self.current_weight_kg
+            + 6.25 * self.current_height_cm
+            - 5 * self.age
+            - 161
+        )
+
+    # -----------------------------
+    # TDEE
+    # -----------------------------
+    @property
+    def tdee(self):
+
+        bmr = self.bmr
+        if not bmr:
+            return None
+
+        activity_multipliers = {
+            "sedentary": 1.2,
+            "light": 1.375,
+            "moderate": 1.55,
+            "very_active": 1.725,
+        }
+
+        multiplier = activity_multipliers.get(
+            self.activity_level.lower() if self.activity_level else "", 1.2
+        )
+
+        return round(bmr * multiplier)
+
+    # -----------------------------
+    # PROFILE COMPLETION
+    # -----------------------------
+    def missing_completion_fields(self):
+
         missing = []
 
         for field in PROFILE_COMPLETION_FIELDS:
@@ -94,49 +167,9 @@ class Profile(models.Model):
 
         return missing
 
-    def is_profile_complete(self) -> bool:
+    def is_profile_complete(self):
+
         return len(self.missing_completion_fields()) == 0
-
-    # -----------------------------
-    # DERIVED HEALTH PROPERTIES
-    # -----------------------------
-    @property
-    def age(self) -> int | None:
-        if not self.dob:
-            return None
-        today = date.today()
-        return today.year - self.dob.year - ((today.month, today.day) < (self.dob.month, self.dob.day))
-
-    @property
-    def bmi(self) -> float | None:
-        if not self.current_weight_kg or not self.current_height_cm:
-            return None
-        height_m = self.current_height_cm / 100
-        if height_m <= 0:
-            return None
-        return round(self.current_weight_kg / (height_m ** 2), 2)
-
-    @property
-    def bmi_category(self) -> str | None:
-        bmi = self.bmi
-        if bmi is None:
-            return None
-        if bmi < 18.5:
-            return "Underweight"
-        elif 18.5 <= bmi < 25:
-            return "Normal"
-        elif 25 <= bmi < 30:
-            return "Overweight"
-        else:
-            return "Obese"
-    
-    @property
-    def user_name(self):
-        return self.user.full_name
-
-    @property
-    def user_email(self):
-        return self.user.email
 
     def __str__(self):
         return f"Profile(user_id={self.user_id})"
