@@ -7,7 +7,7 @@ This is the only class that API views should call.
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -100,6 +100,60 @@ class JemaEngine:
     def _normalize_recipe_name(self, name: str) -> str:
         """Normalize recipe name to canonical form to prevent duplicates."""
         return self.RECIPE_NAME_ALIASES.get(name.lower().strip(), name.lower().strip())
+
+    def _get_static_recipe_template(self, recipe_name: str) -> Optional[Dict[str, Any]]:
+        """Return a static recipe template for known dishes."""
+        templates = {
+            'pilau': {
+                'meal_name': 'Pilau',
+                'cuisine_region': 'Kenya',
+                'core_ingredients': 'Rice, beef, onions, tomatoes, garlic, spices, oil',
+                'recipes': (
+                    '1. Heat oil in a pot and sauté chopped onions and garlic until fragrant. '
+                    '2. Add beef pieces and brown on all sides. '\
+                    '3. Add chopped tomatoes and pilau masala/spices, cook until tender. '
+                    '4. Add rinsed rice and water (1:2 ratio), stir and bring to boil. '
+                    '5. Reduce heat, cover and simmer until rice is cooked and liquid absorbed. '
+                    '6. Fluff rice and serve hot.'
+                ),
+                'notes': 'Use basmati rice for fragrant pilau and serve with kachumbari.'
+            }
+        }
+        return templates.get(recipe_name.lower().strip())
+
+    def _extract_recipe_name(self, user_input: str) -> Optional[str]:
+        """Try to extract recipe name from user text using exact or partial matches."""
+        text = re.sub(r"[^a-z0-9\s]", " ", user_input.lower())
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return None
+
+        # Exact phrase match of known recipe names
+        for _, recipe in self.recipes_df.iterrows():
+            name = str(recipe.get("meal_name", "") or "").lower().strip()
+            if not name:
+                continue
+            normalized = re.sub(r"[^a-z0-9\s]", " ", name)
+            if normalized in text:
+                return recipe.get("meal_name")
+
+        # Partial matching from recipe aliases
+        for alias, canonical in self.RECIPE_NAME_ALIASES.items():
+            if alias in text:
+                return canonical
+
+        # Last fallback: pick the longest known recipe token appearing in text
+        best_match = None
+        best_len = 0
+        for _, recipe in self.recipes_df.iterrows():
+            name = str(recipe.get("meal_name", "") or "").lower().strip()
+            if not name:
+                continue
+            if name in text and len(name) > best_len:
+                best_match = recipe.get("meal_name")
+                best_len = len(name)
+
+        return best_match
 
     def __init__(self, excel_path: Optional[str] = None, debug_mode: bool = False):
         """
@@ -401,6 +455,26 @@ class JemaEngine:
             return self._build_response(message, self.last_suggested_recipes)
 
         # ── Recipe found — display it ──────────────────────────────────────────────────
+        selected_name = None
+
+        if isinstance(selected, dict):
+            selected_name = str(selected.get("meal_name", selected.get("name", ""))).strip()
+        elif hasattr(selected, "get"):
+            selected_name = str(selected.get("meal_name", "")).strip()
+
+        # If we only have a name, try to look up full CSV row
+        if selected_name:
+            recipe_row = self.recipes_df[
+                self.recipes_df["meal_name"].str.lower() == selected_name.lower()
+            ]
+            if not recipe_row.empty:
+                selected = recipe_row.iloc[0]
+            else:
+                # Use static recipe template if available
+                static_template = self._get_static_recipe_template(selected_name)
+                if static_template:
+                    return self._display_full_recipe(static_template, user_input, self.last_user_ingredients)
+
         return self._display_full_recipe(selected, user_input, self.last_user_ingredients)
 
     def _handle_meal_idea(self, user_input: str) -> Dict:
@@ -1197,21 +1271,49 @@ Format as plain text, no markdown. Be specific with measurements and timing."""
         
         return matches
 
-    def _build_response(self, message: str, recipes: List[Dict]) -> Dict:
+    def _build_response(
+        self,
+        message: str,
+        recipes: List[Dict],
+        selected_recipe: Optional[Dict] = None,
+    ) -> Dict:
         """Build a standardized response dictionary."""
         # Clean NaN values from recipes for JSON serialization
         cleaned_recipes = self._clean_recipes(recipes)
-        
+
+        # Build structured suggestion data for frontend-friendly API
+        suggestions = []
+        for r in cleaned_recipes:
+            suggestions.append({
+                "meal_name": r.get("meal_name", ""),
+                "cuisine": r.get("cuisine_region", r.get("country", "")),
+                "coverage": r.get("coverage", None),
+                "matched": r.get("matched", []),
+                "missing": r.get("missing", []),
+            })
+
+        selected = selected_recipe or self.current_recipe
+        selected_recipe_struct = None
+        if selected:
+            selected_recipe_struct = {
+                "meal_name": selected.get("meal_name", selected.get("name", "")),
+                "cuisine": selected.get("cuisine_region", selected.get("country", "")),
+                "ingredients": selected.get("ingredients", selected.get("core_ingredients", "")),
+                "steps": selected.get("steps", selected.get("recipe_steps", [])),
+            }
+
         return {
             "message": message,
             "recipes": cleaned_recipes,
+            "suggestions": suggestions,
+            "selected_recipe": selected_recipe_struct,
             "language": self.llm.current_language,
             "cta": "",  # CTA can be embedded in message
             "state": {
                 "recipe_confirmed": self.recipe_confirmed,
                 "awaiting_recipe_choice": self.awaiting_recipe_choice,
-                "current_recipe": self.current_recipe.get('meal_name', '') if self.current_recipe else None,
-            }
+                "current_recipe": self.current_recipe.get("meal_name", "") if self.current_recipe else None,
+            },
         }
 
     def _clean_recipes(self, recipes: List[Dict]) -> List[Dict]:

@@ -26,6 +26,15 @@ class LLMService:
         self.conversation_history: List[Dict[str, str]] = []
         self.current_language: str = 'english'
         self.client = None
+
+        self.system_prompt_template = """You are Jema, a friendly African cooking assistant. 
+Help users discover meals and prepare dishes from Kenya, Uganda, Tanzania, Ethiopia, Rwanda, Burundi, South Sudan, and Swahili cuisine.
+
+Style: short, simple, friendly, to the point. Plain text only.
+
+{language_instruction}"""
+        self.system_prompt = self.system_prompt_template.format(language_instruction="Respond in English.")
+
         if Groq is None:
             print("Warning: Groq not installed; LLM features will use defaults.")
             return
@@ -40,15 +49,6 @@ class LLMService:
         except Exception as e:
             print(f"Warning: Failed to initialize Groq: {e}")
             self.client = None
-
-        self.system_prompt_template = """You are Jema, a friendly African cooking assistant. 
-Help users discover meals and prepare dishes from Kenya, Uganda, Tanzania, Ethiopia, Rwanda, Burundi, South Sudan, and Swahili cuisine.
-
-Style: short, simple, friendly, to the point. Plain text only.
-
-{language_instruction}"""
-
-        self.system_prompt = self.system_prompt_template.format(language_instruction="Respond in English.")
 
     def add_to_history(self, role: str, content: str) -> None:
         self.conversation_history.append({"role": role, "content": content})
