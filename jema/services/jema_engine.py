@@ -171,8 +171,11 @@ class JemaEngine:
         intent, constraints, community, confidence = IntentClassifier.classify(user_input)
         
         # Route to handler based on intent
+        # Only route to community handler if NOT currently awaiting a recipe selection
+        # When awaiting_recipe_choice is True, the user is selecting a recipe — not requesting community recipes
         if community and intent in [Intent.MEAL_IDEA, Intent.INFORMATION, Intent.CHAT_SOCIAL, Intent.RECIPE_REQUEST]:
-            return self._handle_community_request(user_input, community)
+            if not (self.awaiting_recipe_choice and self.last_suggested_recipes):
+                return self._handle_community_request(user_input, community)
         
         if intent == Intent.GREETING:
             return self._handle_greeting(user_input)
@@ -275,7 +278,7 @@ class JemaEngine:
             if self.llm.current_language == 'swahili':
                 response = "Habari! Mimi ni Jema. Niambie viungo unavyonazo au chakula unachotaka!"
             else:
-                response = "Hello! I'm Jema, your East African cooking assistant. Tell me what ingredients you have or what you'd like to cook!"
+                response = "Hello! I'm Jema, your African cooking assistant. Tell me what ingredients you have or what you'd like to cook!"
         
         self.llm.add_to_history("user", user_input)
         self.llm.add_to_history("assistant", response)
@@ -361,43 +364,41 @@ class JemaEngine:
         # ── Match by name if numeric failed ─────────────────────────────────────────
         if not selected:
             for recipe in self.last_suggested_recipes:
-                # Handle both dict and tuple in case of any remaining inconsistency
-                if isinstance(recipe, tuple):
-                    recipe = recipe[1] if len(recipe) > 1 else {}
-
-                recipe_name = recipe.get("meal_name", "").lower().strip()
+                # Safely get meal name — handle both dict keys and pandas Series
+                if isinstance(recipe, dict):
+                    recipe_name = recipe.get("meal_name", recipe.get("name", "")).lower().strip()
+                else:
+                    try:
+                        recipe_name = str(recipe.get("meal_name", "")).lower().strip()
+                    except Exception:
+                        recipe_name = ""
 
                 # Exact match
                 if selection_lower == recipe_name:
                     selected = recipe
                     break
 
-                # Partial match — user typed part of the name or name contains input
+                # Partial match — user typed part of the name
                 if selection_lower in recipe_name or recipe_name in selection_lower:
                     selected = recipe
                     break
 
-        # ── No match found — prompt user to try again ────────────────────────────────
+        # ── No match — prompt user to choose again ───────────────────────────────────
         if not selected:
-            recipe_list = "\n".join([
-                f"{i+1}. {r.get('meal_name', '') if isinstance(r, dict) else r[1].get('meal_name', '')}"
-                for i, r in enumerate(self.last_suggested_recipes)
-            ])
-            return {
-                "message": (
-                    f"I didn't find that recipe in my suggestions.\n\n"
-                    f"Please choose from:\n{recipe_list}\n\n"
-                    f"Type the number or the recipe name."
-                ),
-                "recipes": self.last_suggested_recipes,
-                "language": self.current_language,
-                "cta": "Which recipe would you like?",
-                "state": {
-                    "awaiting_recipe_choice": self.awaiting_recipe_choice,
-                    "recipe_confirmed": getattr(self, "recipe_confirmed", False),
-                    "current_recipe": self.current_recipe,
-                }
-            }
+            recipe_lines = []
+            for i, r in enumerate(self.last_suggested_recipes, 1):
+                if isinstance(r, dict):
+                    name = r.get("meal_name", r.get("name", ""))
+                else:
+                    name = str(r.get("meal_name", ""))
+                recipe_lines.append(f"{i}. {name}")
+
+            message = (
+                f"I didn't catch that. Please choose from:\n\n"
+                + "\n".join(recipe_lines)
+                + "\n\nType the number or the recipe name."
+            )
+            return self._build_response(message, self.last_suggested_recipes)
 
         # ── Recipe found — display it ──────────────────────────────────────────────────
         return self._display_full_recipe(selected, user_input, self.last_user_ingredients)
@@ -431,71 +432,96 @@ class JemaEngine:
         return self._build_response(response, [])
 
     def _handle_recipe_request(self, user_input: str) -> Dict:
-        """Handle specific recipe requests (I want to make X)."""
-        # Extract recipe query
-        recipe_query = user_input.lower()
-        for phrase in ['i would like to make', 'i want to make', 'recipe for', 'how do i make', 'show me', 'ninataka', 'i would like', 'i want']:
-            recipe_query = recipe_query.replace(phrase, '').strip()
-        
-        # Try to split query by "and" to handle pairing requests (e.g., "ugali and greens")
-        query_parts = [q.strip() for q in recipe_query.split(' and ')]
-        found_recipes = []
-        
-        # Search database for each part
-        for part in query_parts:
-            part_matches = []
-            for idx, recipe in self.recipes_df.iterrows():
-                meal_name = recipe.get('meal_name', '')
-                if pd.isna(meal_name):
-                    continue
-                meal_name_lower = str(meal_name).lower()
-                # Exact or partial match
-                if part in meal_name_lower or meal_name_lower in part:
-                    part_matches.append(recipe)
-            
-            if part_matches:
-                # Take best match for this part
-                found_recipes.append(part_matches[0])
-            elif len(query_parts) == 1:
-                # Single dish not found - will generate via LLM below
-                found_recipes = []
-                break
-        
-        # If we found at least one recipe from the database
-        if found_recipes:
-            if len(found_recipes) == 1:
-                # Single recipe found
-                return self._display_full_recipe(found_recipes[0], user_input)
-            else:
-                # Multiple recipes found - display as a meal pairing
-                return self._display_meal_pairing(found_recipes, user_input)
-        else:
-            # No database matches - Generate recipe for specific dish request using LLM
-            # This handles requests like "rice and beef stew" or "ugali and greens"
-            prompt = f"""Generate a complete traditional East African recipe for '{recipe_query}'. 
+        """Handle direct recipe requests like 'How do I cook pilau?'"""
 
-Provide:
-1. Brief description (1-2 sentences)
-2. Full ingredient list with quantities
-3. Step-by-step cooking instructions (numbered)
-4. 2-3 practical cooking tips
+        # Extract recipe name from the request
+        recipe_name = self._extract_recipe_name(user_input)
 
-Format as plain text, no markdown. Be specific with measurements and timing."""
-
-            llm_response = self.llm.general_response(prompt, use_history=False, include_cta=False)
-            
-            message = f"🍽️ {recipe_query.title()}\n\n{llm_response}"
-            message += "\n\nLet me know if you need any clarification, or if you'd like to try something else!"
-            
-            # Lock in recipe
-            self.current_recipe = {"meal_name": recipe_query.title()}
-            self.recipe_confirmed = True
-            self.awaiting_recipe_choice = False
-            
+        if not recipe_name:
+            response = self.llm.general_response(user_input, use_history=True, include_cta=True)
             self.llm.add_to_history("user", user_input)
-            self.llm.add_to_history("assistant", message)
-            
-            return self._build_response(message, [self.current_recipe])
+            self.llm.add_to_history("assistant", response)
+            return self._build_response(response, [])
+
+        # Call generate_recipe to get the full rich recipe
+        try:
+            recipe_data = self.llm.generate_recipe(
+                recipe_name=recipe_name,
+                cuisine_region="East Africa"
+            )
+        except Exception as e:
+            print(f"Recipe generation error: {e}")
+            response = self.llm.general_response(user_input, use_history=True, include_cta=True)
+            return self._build_response(response, [])
+
+        if not recipe_data:
+            response = self.llm.general_response(user_input, use_history=True, include_cta=True)
+            return self._build_response(response, [])
+
+        cuisine      = (
+            recipe_data.get("cuisine", "")
+            or recipe_data.get("cuisine_region", "")
+            or "East Africa"
+        )
+        introduction = recipe_data.get("introduction", "")
+        ingredients  = recipe_data.get("ingredients", [])
+        steps        = recipe_data.get("steps", [])
+        tips         = recipe_data.get("tips", [])
+
+        # Build rich output — same format as recipe selection
+        output = f"\nGreat! Here's the recipe for {recipe_name.title()}\n"
+
+        if introduction:
+            output += f"\n{introduction}\n"
+
+        output += f"\nCuisine: {cuisine}\n"
+
+        output += "\nEssential Ingredients\n\n"
+        for ing in ingredients:
+            ing = ing.strip()
+            if not ing.startswith("*"):
+                ing = "* " + ing
+            # Skip empty category lines like "* Vegetables:" or "* Optional:"
+            # These are lines where Groq returned a category with nothing after the colon
+            parts = ing.split(":", 1)
+            if len(parts) == 2 and not parts[1].strip():
+                continue
+            output += ing + "\n"
+
+        output += "\nStep-by-Step Cooking Instructions\n\n"
+        for i, step in enumerate(steps[:7], 1):
+            step = step.strip()
+            step = re.sub(r'^\d+[\.\)]\s*', '', step).strip()
+            step = re.sub(r'\*\*', '', step).strip()
+            if not step.endswith((".", "!", "?")):
+                step += "."
+            output += f"{i}. {step}\n"
+
+        if tips:
+            output += f"\nTips for Perfect {recipe_name.title()}\n\n"
+            for tip in tips:
+                tip = tip.strip()
+                if not tip.startswith("*"):
+                    tip = "* " + tip
+                output += tip + "\n"
+
+        output += "\nLet me know if you need any clarification on any step, or if you'd like to try something else!\n"
+
+        # Store as current recipe
+        self.current_recipe = {
+            "meal_name": recipe_name.title(),
+            "cuisine_region": cuisine,
+            "ingredients": ingredients,
+            "steps": steps,
+            "tips": tips
+        }
+        self.recipe_confirmed = True
+        self.awaiting_recipe_choice = False
+
+        self.llm.add_to_history("user", user_input)
+        self.llm.add_to_history("assistant", output)
+
+        return self._build_response(output, [self.current_recipe])
 
     def _handle_ingredient_based(self, user_input: str, constraints: List) -> Dict:
         """Handle ingredient-based recipe matching with East African focus and deduplication."""
@@ -537,8 +563,9 @@ Format as plain text, no markdown. Be specific with measurements and timing."""
         normalized_ingredients = [ing.lower().strip() for ing in user_ingredients]
         
         # Debug: Show what ingredients normalizer is doing
-        print(f"[INGREDIENT DEBUG] Raw input     : {user_ingredients}")
-        print(f"[INGREDIENT DEBUG] After normalize: {normalized_ingredients}")
+        if self.debug_mode:
+            print(f"[INGREDIENT DEBUG] Raw input     : {user_ingredients}")
+            print(f"[INGREDIENT DEBUG] After normalize: {normalized_ingredients}")
         
         # Get raw CSV results — convert to dicts immediately
         raw_csv_results = []
@@ -690,8 +717,58 @@ Format as plain text, no markdown. Be specific with measurements and timing."""
                 final_names.add(name_key)
         all_recipes = final_recipes[:3]
 
+        # If still fewer than 3 after merge, fill with defaults based on ingredients
+        if len(all_recipes) < 3:
+            existing_names = {self._normalize_recipe_name(r.get("meal_name", "")) for r in all_recipes}
+            normalized_set_lower = set(normalized_ingredients)
+
+            # Default fallback recipes mapped to common ingredient combinations
+            INGREDIENT_DEFAULTS = [
+                ({"rice", "beef", "onion"},    [
+                    {"meal_name": "Pilau",             "cuisine_region": "Kenya"},
+                    {"meal_name": "Biriani",            "cuisine_region": "Tanzania"},
+                    {"meal_name": "Rice and Beef Stew", "cuisine_region": "Kenya"},
+                ]),
+                ({"eggs", "onion"},            [
+                    {"meal_name": "Ugali Mayai",  "cuisine_region": "Kenya"},
+                    {"meal_name": "Rolex",        "cuisine_region": "Uganda"},
+                    {"meal_name": "Chapati Mayai","cuisine_region": "Kenya"},
+                ]),
+                ({"beans", "onion", "tomato"}, [
+                    {"meal_name": "Beans Stew",  "cuisine_region": "Kenya"},
+                    {"meal_name": "Githeri",     "cuisine_region": "Kenya"},
+                    {"meal_name": "Maharagwe",   "cuisine_region": "Tanzania"},
+                ]),
+                ({"chicken", "onion", "tomato"},[  
+                    {"meal_name": "Kuku Mchuzi",    "cuisine_region": "Kenya"},
+                    {"meal_name": "Kuku wa Kupaka", "cuisine_region": "Kenya"},
+                ]),
+                ({"potato", "onion"},          [
+                    {"meal_name": "Irio",       "cuisine_region": "Kenya"},
+                    {"meal_name": "Mukimo",     "cuisine_region": "Kenya"},
+                    {"meal_name": "Viazi Karai","cuisine_region": "Kenya"},
+                ]),
+                ({"lentils", "onion"},         [
+                    {"meal_name": "Ndengu",    "cuisine_region": "Kenya"},
+                    {"meal_name": "Misir Wot", "cuisine_region": "Ethiopia"},
+                ]),
+                ({"kale", "onion"},            [
+                    {"meal_name": "Sukuma Wiki","cuisine_region": "Kenya"},
+                    {"meal_name": "Githeri",   "cuisine_region": "Kenya"},
+                ]),
+            ]
+
+            for ingredient_set, defaults in INGREDIENT_DEFAULTS:
+                if ingredient_set.issubset(normalized_set_lower):
+                    for default in defaults:
+                        name_key = self._normalize_recipe_name(default["meal_name"])
+                        if name_key not in existing_names and len(all_recipes) < 3:
+                            all_recipes.append(default)
+                            existing_names.add(name_key)
+                    break
+
         # Store full recipes in session state
-        self.suggested_recipes = all_recipes
+        self.last_suggested_recipes = all_recipes
         self.awaiting_recipe_choice = True
 
         # Accuracy debug
@@ -849,18 +926,11 @@ Format as plain text, no markdown. Be specific with measurements and timing."""
                     ing = ing.strip()
                     if not ing.startswith("*"):
                         ing = "* " + ing
+                    # Skip empty category lines
+                    parts = ing.split(":", 1)
+                    if len(parts) == 2 and not parts[1].strip():
+                        continue
                     output += ing + "\n"
-            
-            # Add steps
-            if recipe_data.get('steps'):
-                output += "\nStep-by-Step Cooking Instructions\n\n"
-                for i, step in enumerate(recipe_data.get('steps', []), 1):
-                    step = step.strip()
-                    # If step already has a title with colon, keep it; otherwise just number it
-                    if ':' in step:
-                        output += f"{i}. {step}\n"
-                    else:
-                        output += f"{i}. {step}\n"
             
             # Add tips
             if recipe_data.get('tips'):
@@ -896,6 +966,10 @@ Format as plain text, no markdown. Be specific with measurements and timing."""
                     ing = ing.strip()
                     if not ing.startswith("*"):
                         ing = "* " + ing
+                    # Skip empty category lines
+                    parts = ing.split(":", 1)
+                    if len(parts) == 2 and not parts[1].strip():
+                        continue
                     output += ing + "\n"
                 
                 # Add steps
