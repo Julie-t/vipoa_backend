@@ -30,7 +30,7 @@ class LLMService:
             print("Warning: Groq not installed; LLM features will use defaults.")
             return
 
-        api_key = os.environ.get("GROQ_API_KEY", "api key")
+        api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
             print("Warning: GROQ_API_KEY not found. LLM features disabled.")
             return
@@ -41,7 +41,7 @@ class LLMService:
             print(f"Warning: Failed to initialize Groq: {e}")
             self.client = None
 
-        self.system_prompt_template = """You are Jema, a friendly East African cooking assistant. 
+        self.system_prompt_template = """You are Jema, a friendly African cooking assistant. 
 Help users discover meals and prepare dishes from Kenya, Uganda, Tanzania, Ethiopia, Rwanda, Burundi, South Sudan, and Swahili cuisine.
 
 Style: short, simple, friendly, to the point. Plain text only.
@@ -98,7 +98,7 @@ Style: short, simple, friendly, to the point. Plain text only.
         if not steps:
             return []
         steps_text = "\n".join([f"{i+1}. {step}" for i, step in enumerate(steps)])
-        prompt = f"""You are Jema, an East African cooking assistant.
+        prompt = f"""You are Jema, an African cooking assistant.
 Ingredients: {ingredients}
 Recipe: {recipe_name}
 
@@ -170,34 +170,76 @@ Expand each step with clear instructions, timing, and tips."""
         exclude_str = ", ".join(exclude_names) if exclude_names else "none"
         
         # Build the prompt with strict rules
-        prompt = f"""You are Jema, an expert African cooking assistant with deep knowledge of East African, West African, and Southern African cuisine.
+        prompt = f"""You are Jema, an expert African cooking assistant specializing in East African cuisine.
 
 THE USER HAS EXACTLY THESE INGREDIENTS: {ingredients_str}
 
-YOUR ONLY JOB: Suggest exactly {count} African dish(es) where ALL of these ingredients are used: {ingredients_str}
+YOUR ONLY JOB: Suggest exactly {count} African dish(es) where ALL of these ingredients are the PRIMARY components.
 
-BEFORE YOU SUGGEST ANYTHING — run this check for each dish you are considering:
-1. Does this dish use {ingredients_str} as its MAIN components?
-2. If ANY of {ingredients_str} is missing from the dish — REJECT that dish and think of another
-3. Only suggest the dish if ALL of {ingredients_str} appear as primary components
+BEFORE SUGGESTING ANYTHING run this check for each dish:
+1. Does this dish use ALL of {ingredients_str} as main components?
+2. Is this dish known by this exact name in its country without a country prefix?
+3. If removing the country name leaves a meaningless description — REJECT it and find a real dish
+
+REAL DISH NAME TEST — apply this test to every suggestion:
+PASS examples — these are real recognized dish names:
+- Rolex ✅ recognized Ugandan name on its own
+- Ugali Mayai ✅ recognized Kenyan name on its own
+- Chapati Mayai ✅ recognized name on its own
+- Pilau ✅ recognized name on its own
+- Ndengu ✅ recognized Kenyan name on its own
+- Biriani ✅ recognized Tanzanian name on its own
+- Kuku Mchuzi ✅ recognized Kenyan name on its own
+- Matoke ✅ recognized Ugandan name on its own
+
+FAIL examples — these are invented names, never use them:
+- Ugandan Rolex ❌ real name is just Rolex
+- Kenyan Egg Stew ❌ invented description
+- Ethiopian Scrambled Eggs ❌ not a real dish name
+- Eritrean Frittered Eggs ❌ completely invented
+- Scotch Eggs with Sukuma Wiki ❌ invented fusion
+- Egg and Vegetable Tagine ❌ Tagine is Moroccan not East African
+- Kuku wa Nyama ❌ means chicken of meat which is nonsense
+- Tanzanian Rice Dish ❌ invented description
+- Ugandan Lentil Curry ❌ invented, use Ndengu instead
+
+MANDATORY INGREDIENT MATCHING — use this to select the correct dish:
+- eggs + onion + bell pepper → Ugali Mayai (Kenya), Rolex (Uganda), Chapati Mayai (Kenya)
+- eggs + onion + tomato → Ugali Mayai (Kenya), Rolex (Uganda), Chapati Mayai (Kenya)
+- eggs + onion → Ugali Mayai (Kenya), Rolex (Uganda), Chapati Mayai (Kenya)
+- rice + beef + onion → Pilau (Kenya), Biriani (Tanzania), Rice and Beef Stew (Kenya)
+- rice + chicken + onion → Pilau (Kenya), Kuku Mchuzi (Kenya), Biryani (Kenya)
+- beans + onion + tomato → Beans Stew (Kenya), Githeri (Kenya), Maharagwe (Tanzania)
+- chicken + onion + tomato → Kuku Mchuzi (Kenya), Kuku wa Kupaka (Kenya)
+- lentils + onion → Ndengu (Kenya), Misir Wot (Ethiopia)
+- potato + onion → Irio (Kenya), Mukimo (Kenya), Viazi Karai (Kenya)
+- kale + onion → Sukuma Wiki (Kenya), Githeri (Kenya)
+- fish + coconut milk → Samaki wa Kupaka (Kenya), Samaki wa Nazi (Tanzania)
+- banana + meat → Matoke (Uganda), Katogo (Uganda)
+- maize + beans → Githeri (Kenya), Muthokoi (Kenya)
+
+PRIORITY ORDER:
+1. FIRST — East African dishes from Kenya, Tanzania, Uganda, Rwanda, Burundi, Somalia
+2. SECOND — broader African dishes only if no East African dish fits ALL of {ingredients_str}
+3. NEVER suggest non-African dishes
 
 STRICT RULES:
-1. Every dish MUST have a real recognized African name — do NOT invent names like "Ugandan Lentil Curry" or "Kenyan Beef Dish"
-2. The dish MUST use ALL of {ingredients_str} as primary components
+1. NEVER invent a dish name by combining a country name with a generic food description
+2. Every dish MUST use ALL of {ingredients_str} as primary components
 3. Do NOT suggest any of these already found recipes: {exclude_str}
 4. Do NOT suggest two dishes that are the same recipe with different spellings
-5. Cuisine region MUST be a specific African country
-6. FIRST priority is East African dishes — only suggest broader African dishes if no East African dish fits
-7. Steps must be exactly 4 to 7 practical home cooking steps each with a title
+5. Cuisine MUST be the specific country where this dish is genuinely known by locals
 
-BANNED DISHES:
-Ndizi Nyama, Sekela, Tibs, Doro Wot, Injera, Kitfo, Shakshuka, Mchuzi wa Pweza
+FINAL CHECK before returning your answer:
+- Are all dish names real recognized African names that exist without a country prefix?
+- Do all dishes use ALL of {ingredients_str} as primary components?
+- Are there any duplicates or invented names?
 
 Return EXACTLY this plain text format repeated {count} time(s).
-No JSON. No markdown. Nothing before the first RECIPE_START:
+No JSON. No markdown. No preamble. Nothing before the first RECIPE_START:
 
 RECIPE_START
-Meal: <Real African Dish Name>
+Meal: <Real African Dish Name — no country prefix>
 Cuisine: <Specific African Country>
 Uses ingredients: <comma separated list of user ingredients this dish uses>
 
@@ -206,15 +248,15 @@ Introduction
 
 Essential Ingredients
 
-* Rice: <quantity> <ingredient> (<preparation note>)
+* Starch: <quantity> <ingredient> (<preparation note>)
 * Protein: <quantity> <ingredient> (<preparation note>)
 * Aromatics: <quantity> <ingredient> (<prep note>), <quantity> <ingredient> (<prep note>)
-* Spices: <quantity> <spice mix> (<individual spices if relevant>)
-* Liquid: <quantity> <liquid> (<alternative if any>)
+* Vegetables: <quantity> <ingredient> (<prep note>)
+* Spices: <quantity> <spice> (<note>)
 * Fat: <quantity> <oil or fat>
 * Optional: <ingredient> (<note>)
 
-Use ONLY these category labels: Rice, Starch, Grain, Protein, Aromatics, Vegetables, Spices, Liquid, Fat, Optional
+Use ONLY these category labels: Starch, Grain, Protein, Aromatics, Vegetables, Spices, Liquid, Fat, Optional
 Every ingredient line MUST start with * and follow: * Category: quantity ingredient (note)
 ALL of these ingredients MUST appear in the list: {ingredients_str}
 
@@ -224,6 +266,11 @@ Step-by-Step Cooking Instructions
 2. <Step Title>: <Detailed instruction with technique and timing.>
 3. <Step Title>: <Detailed instruction with technique and timing.>
 4. <Step Title>: <Detailed instruction with technique and timing.>
+5. <Step Title>: <Detailed instruction with technique and timing.>
+6. <Step Title>: <Detailed instruction with technique and timing.>
+
+IMPORTANT: You MUST include exactly 4 to 6 steps. Never skip this section.
+Every step MUST have a title followed by a colon then the instruction.
 
 Tips for Perfect <Meal Name>
 
@@ -240,7 +287,7 @@ RECIPE_END"""
                 ],
                 model="llama-3.3-70b-versatile",
                 max_tokens=3000,
-                temperature=0.7
+                temperature=0.3
             )
             
             response_text = response.choices[0].message.content.strip()
@@ -329,13 +376,20 @@ RECIPE_END"""
                 mode = "ingredients"
                 continue
             
-            # Detect "Step-by-Step" section header
-            elif "step" in line_stripped.lower() and ("cooking" in line_stripped.lower() or "instruction" in line_stripped.lower()):
+            # Detect "Step-by-Step" section header (multiple format variants)
+            elif (line_stripped.lower().startswith("step-by-step") or
+                  line_stripped.lower().startswith("steps") or
+                  line_stripped.lower().startswith("cooking instructions") or
+                  line_stripped.lower().startswith("instructions") or
+                  "step-by-step" in line_stripped.lower()):
                 mode = "steps"
                 continue
             
             # Detect "Tips" section header
-            elif "tips for perfect" in line_stripped.lower():
+            elif ("tips for perfect" in line_stripped.lower() or
+                  "tips for" in line_stripped.lower() or
+                  line_stripped.lower().strip() == "tips" or
+                  line_stripped.lower().startswith("tips")):
                 mode = "tips"
                 continue
             
@@ -354,20 +408,27 @@ RECIPE_END"""
             
             # Parse steps (lines starting with numbers)
             elif mode == "steps":
-                if line_stripped and line_stripped[0].isdigit():
-                    # Extract step title and instruction
-                    # Format: N. Title: instruction
-                    if "." in line_stripped:
-                        parts = line_stripped.split(".", 1)
-                        if len(parts) > 1:
-                            rest = parts[1].strip()
-                            if ":" in rest:
-                                title, instruction = rest.split(":", 1)
-                                step_line = f"{title.strip()}: {instruction.strip()}"
-                            else:
-                                step_line = rest
-                            if step_line:
-                                steps.append(step_line)
+                if not line_stripped:
+                    continue
+                # Accept numbered lines: "1.", "1)", "Step 1:"
+                is_numbered = bool(re.match(r'^\d+[\.)\]\s+', line_stripped))
+                is_step_label = line_stripped.lower().startswith("step ")
+
+                if is_numbered or is_step_label:
+                    # Remove number prefix: "1. " or "1) "
+                    cleaned = re.sub(r'^\d+[\.)\]\s*', '', line_stripped).strip()
+                    # Remove "Step N:" prefix if present
+                    cleaned = re.sub(r'^step\s*\d+[\.):]\*\s*', '', cleaned,
+                                     flags=re.IGNORECASE).strip()
+                    # Remove markdown bold markers
+                    cleaned = re.sub(r'\*\*', '', cleaned).strip()
+                    if cleaned and len(cleaned) > 5:
+                        steps.append(cleaned)
+                elif steps and line_stripped and not line_stripped.startswith(("*", "-", "Tips")):
+                    # Continuation line — append to previous step
+                    continuation = re.sub(r'\*\*', '', line_stripped).strip()
+                    if continuation:
+                        steps[-1] = steps[-1].rstrip(".") + " " + continuation
             
             # Parse tips (lines starting with *)
             elif mode == "tips":
@@ -402,82 +463,77 @@ RECIPE_END"""
         if self.client is None:
             return {}
         
-        prompt = f"""You are Jema, an expert East African cooking assistant.
+        prompt = f"""SYSTEM INSTRUCTION: You are Jema, an expert East African cooking assistant. You MUST return the recipe in the EXACT structured format shown below. Do NOT return prose paragraphs. Do NOT skip any section. Follow the format character by character.
 
-Generate a detailed authentic African recipe for: {recipe_name}
-{"Cuisine region: " + cuisine_region if cuisine_region else ""}
+Recipe: {recipe_name}
+{"Cuisine: " + cuisine_region if cuisine_region else ""}
 
-Return the recipe in EXACTLY this format. Follow every section precisely.
-Do not add extra sections. Do not skip any section. Do not use markdown:
+Return using EXACTLY this structure — all 4 sections are mandatory:
 
 Introduction
-Write exactly 2 to 3 sentences describing this dish, its cultural significance,
-and the key technique or ingredient that defines it. Be specific to the country
-or region this dish comes from.
+[2 to 3 sentences about this dish — its country of origin, cultural significance, and the defining technique or ingredient.]
 
-Cuisine: [Specific country name e.g. Kenya, Tanzania, Uganda]
+Cuisine: [Specific country e.g. Kenya, Tanzania, Uganda, Ethiopia]
 
 Essential Ingredients
 
-* [Category]: [quantity] [ingredient name] ([preparation note])
-* [Category]: [quantity] [ingredient name] ([preparation note])
-* [Category]: [quantity] [ingredient name] ([preparation note])
-* [Category]: [quantity] [ingredient name] ([preparation note])
-* [Category]: [quantity] [ingredient name] ([preparation note])
-* [Category]: [quantity] [ingredient name] ([preparation note])
-* Optional: [ingredient] ([preparation note])
+* Starch: [quantity] [ingredient] ([preparation note])
+* Protein: [quantity] [ingredient] ([preparation note])
+* Aromatics: [quantity] [ingredient] ([prep note]), [quantity] [ingredient] ([prep note])
+* Spices: [quantity] [spice name] ([whole vs ground, alternatives])
+* Liquid: [quantity] [liquid] ([alternative in brackets])
+* Fat: [quantity] [oil or fat type]
+* Optional: [ingredient] ([note])
 
-Use ONLY these category labels:
-Rice, Starch, Grain, Protein, Aromatics, Vegetables, Spices, Liquid, Fat, Optional
-
-Each ingredient line MUST follow this pattern exactly:
-* Category: quantity ingredient-name (preparation note)
-
-Examples:
-* Rice: 2 cups Basmati rice (soaked for 20–30 mins)
-* Protein: 500g beef (cut into chunks)
-* Aromatics: 2 large onions (finely sliced), 3 cloves garlic (minced), 1 tbsp ginger (grated)
-* Spices (Pilau Masala): 2 tbsp pilau masala (or whole seeds: cumin, cardamom, cinnamon)
-* Liquid: 4 cups beef broth (or water)
-* Fat: 3 tbsp vegetable oil or ghee
-* Optional: 2 potatoes (halved), fresh cilantro (for garnish)
+INGREDIENT RULES:
+- Category labels allowed: Starch, Grain, Protein, Aromatics, Vegetables, Spices, Liquid, Fat, Optional
+- Every line starts with * then Category: quantity ingredient (note)
+- Include ALL ingredients needed to cook this dish from scratch for 4 servings
+- Be specific with quantities — never write "some" or "to taste" for main ingredients
 
 Step-by-Step Cooking Instructions
 
-1. [Step Title]: [Detailed instruction with technique, timing, and what to look for.]
-2. [Step Title]: [Detailed instruction with technique, timing, and what to look for.]
-3. [Step Title]: [Detailed instruction with technique, timing, and what to look for.]
-4. [Step Title]: [Detailed instruction with technique, timing, and what to look for.]
-5. [Step Title]: [Detailed instruction with technique, timing, and what to look for.]
-6. [Step Title]: [Detailed instruction with technique, timing, and what to look for.]
+1. [Step Title]: [2 sentences — what to do, how long, and what to look for when done.]
+2. [Step Title]: [2 sentences — what to do, how long, and what to look for when done.]
+3. [Step Title]: [2 sentences — what to do, how long, and what to look for when done.]
+4. [Step Title]: [2 sentences — what to do, how long, and what to look for when done.]
+5. [Step Title]: [2 sentences — what to do, how long, and what to look for when done.]
+6. [Step Title]: [2 sentences — what to do, how long, and what to look for when done.]
 
 Rules for steps:
-- Provide exactly 4 to 7 steps
-- Every step MUST have a title followed by a colon then the instruction
-- Title must describe what the step does e.g. "Brown the Onions", "Add Spices", "Simmer and Steam"
-- Include cooking times, heat levels, and visual cues in every step
+- Include EXACTLY 4 to 6 steps — never fewer than 4
+- Every step has a descriptive title followed by a colon
+- Every step is exactly 2 sentences — one for what to do, one for timing or visual cue
+- Steps must be in logical cooking order
 
-Tips for Perfect [Recipe Name]
+Tips for Perfect {recipe_name}
 
-* [Tip label]: [Practical explanation]
-* [Tip label]: [Practical explanation]
-* [Tip label]: [Serving suggestion]
+* [Tip label]: [One practical sentence about technique or common mistake to avoid.]
+* [Tip label]: [One practical sentence about ingredients or substitution.]
+* Serve with: [Specific traditional accompaniment from this dish's country.]
 
-Rules for tips:
-- Provide exactly 3 to 4 tips
-- Every tip MUST have a label followed by a colon then the explanation
-- Last tip must be a serving suggestion starting with "Serve with:"
+TIP RULES:
+- Include exactly 3 tips
+- Every tip has a label followed by a colon
+- Last tip MUST start with "Serve with:"
+
+MANDATORY FINAL CHECK — verify before returning:
+[ ] Introduction section present with 2-3 sentences
+[ ] Essential Ingredients section present with * Category: format
+[ ] Step-by-Step Cooking Instructions present with 4-6 numbered titled steps
+[ ] Tips for Perfect {recipe_name} present with 3 tips
+If any section is missing — write it before returning.
 """
         
         try:
             response = self.client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": "You are an expert East African cooking assistant generating detailed recipes."},
+                    {"role": "system", "content": "You are an expert African cooking assistant generating detailed recipes."},
                     {"role": "user", "content": prompt}
                 ],
                 model="llama-3.3-70b-versatile",
                 max_tokens=3000,
-                temperature=0.7
+                temperature=0.3
             )
             
             response_text = response.choices[0].message.content.strip()
@@ -489,92 +545,129 @@ Rules for tips:
     
     def _parse_recipe(self, text: str, cuisine_region: str = None) -> dict:
         """
-        Parse the structured recipe text returned by Groq.
-
-        Handles these sections in order:
-        - Introduction (2-3 sentences before Cuisine line)
-        - Cuisine: Country
-        - Essential Ingredients (* Category: quantity ingredient (note))
-        - Step-by-Step Cooking Instructions (N. Title: instruction)
-        - Tips for Perfect [Name] (* Label: explanation)
+        Parse structured recipe text returned by generate_recipe.
+        Handles all section header variations Groq might return.
         """
-
         cuisine = cuisine_region or "East Africa"
         introduction = ""
         ingredients = []
         steps = []
         tips = []
+        intro_lines = []
         mode = None
 
-        lines = text.split("\n")
-
-        for line in lines:
-            line = line.strip()
-
+        for raw_line in text.split("\n"):
+            line = raw_line.strip()
             if not line:
                 continue
 
-            # ── Cuisine line ─────────────────────────────────────────────────────
-            if line.lower().startswith("cuisine:"):
+            line_lower = line.lower()
+
+            # ── Cuisine ─────────────────────────────────────────────────────────────
+            if line_lower.startswith("cuisine:"):
                 cuisine = line.split(":", 1)[1].strip()
                 mode = None
                 continue
 
-            # ── Section headers ───────────────────────────────────────────────────
-            if line.lower().startswith("introduction"):
+            # ── Section headers ─────────────────────────────────────────────────────
+            if line_lower in ("introduction", "intro"):
                 mode = "introduction"
                 continue
 
-            if line.lower().startswith("essential ingredients"):
+            if ("essential ingredients" in line_lower or
+                    line_lower.strip() == "ingredients"):
+                if intro_lines:
+                    introduction = " ".join(intro_lines).strip()
+                    intro_lines = []
                 mode = "ingredients"
                 continue
 
-            if line.lower().startswith("step-by-step") or line.lower().startswith("steps"):
+            if (line_lower.startswith("step-by-step") or
+                    "step-by-step" in line_lower or
+                    line_lower.startswith("cooking instruction") or
+                    line_lower.startswith("cooking steps") or
+                    line_lower.strip() in ("steps", "instructions", "method",
+                                           "cooking instructions",
+                                           "step-by-step cooking instructions")):
+                if intro_lines:
+                    introduction = " ".join(intro_lines).strip()
+                    intro_lines = []
                 mode = "steps"
                 continue
 
-            if line.lower().startswith("tips for") or line.lower() == "tips":
+            if ("tips for" in line_lower or
+                    line_lower.strip() == "tips" or
+                    line_lower.startswith("tips")):
                 mode = "tips"
                 continue
 
-            # ── Content parsing by mode ───────────────────────────────────────────
+            # Skip separator lines
+            if line.strip() in ("---", "===", "***", ""):
+                continue
+
+            # ── Content by mode ─────────────────────────────────────────────────────
 
             if mode == "introduction":
-                # Collect introduction lines until we hit a section header
-                if not line.lower().startswith(("cuisine:", "essential", "step", "tips")):
-                    introduction += line + " "
+                if not any(line_lower.startswith(h) for h in
+                           ("cuisine:", "essential", "ingredient",
+                            "step", "tips", "---")):
+                    intro_lines.append(line)
+                continue
+
+            # If no mode yet and line looks like intro text collect it
+            if mode is None and line and not line.startswith("*"):
+                if not any(line_lower.startswith(h) for h in
+                           ("cuisine:", "essential", "ingredient",
+                            "step", "tips", "---", "introduction")):
+                    intro_lines.append(line)
                 continue
 
             if mode == "ingredients":
-                # Each ingredient line starts with * Category: ...
-                if line.startswith("*"):
-                    ingredient = line.lstrip("*").strip()
-                    if ingredient:
-                        ingredients.append(ingredient)
+                if line.startswith(("*", "-")):
+                    ing = line.lstrip("*-").strip()
+                    ing = re.sub(r'\*\*', '', ing).strip()
+                    if ing and len(ing) > 2:
+                        ingredients.append(ing)
                 continue
 
             if mode == "steps":
-                # Each step starts with a number: "1. Title: instruction"
-                cleaned = re.sub(r'^\d+[\.\)]\s*', '', line).strip()
-                # Remove markdown bold markers
-                cleaned = re.sub(r'\*\*', '', cleaned).strip()
-                if cleaned:
-                    steps.append(cleaned)
+                is_numbered = bool(re.match(r'^\d+[\.\)]\s+', line))
+                is_step_label = line_lower.startswith("step ")
+
+                if is_numbered or is_step_label:
+                    cleaned = re.sub(r'^\d+[\.\)]\s*', '', line).strip()
+                    cleaned = re.sub(r'^step\s*\d+[\.\):]*\s*', '', cleaned,
+                                     flags=re.IGNORECASE).strip()
+                    cleaned = re.sub(r'\*\*', '', cleaned).strip()
+                    if cleaned and len(cleaned) > 5:
+                        steps.append(cleaned)
+                elif steps and line and not line.startswith(("*", "-")):
+                    if not any(line_lower.startswith(h) for h in
+                               ("tips", "essential", "cuisine")):
+                        continuation = re.sub(r'\*\*', '', line).strip()
+                        if continuation:
+                            steps[-1] = steps[-1].rstrip(".") + " " + continuation
                 continue
 
             if mode == "tips":
-                # Each tip starts with * Label: explanation
-                if line.startswith("*"):
-                    tip = line.lstrip("*").strip()
-                    if tip:
+                if line.startswith(("*", "-")):
+                    tip = line.lstrip("*-").strip()
+                    tip = re.sub(r'\*\*', '', tip).strip()
+                    if tip and len(tip) > 2:
                         tips.append(tip)
+                elif tips and line:
+                    tips[-1] = tips[-1] + " " + line
                 continue
+
+        # Finalize introduction
+        if intro_lines and not introduction:
+            introduction = " ".join(intro_lines).strip()
 
         return {
             "cuisine": cuisine,
-            "introduction": introduction.strip(),
+            "introduction": introduction,
             "ingredients": ingredients,
-            "steps": steps[:7],
-            "tips": tips
+            "steps": steps[:6],
+            "tips": tips,
         }
         
