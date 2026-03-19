@@ -78,20 +78,6 @@ SW_MARKERS = {
     "muda", "viungo", "karibu"
 }
 
-PROTEIN_INGREDIENTS = {
-    "chicken", "kuku", "beef", "meat", "fish", "tilapia",
-    "shrimp", "prawn", "prawns", "goat", "lamb", "pork",
-    "eggs", "egg", "beans", "lentils", "tofu", "turkey"
-}
-
-LEAFY_GREENS = {
-    "kale", "sukuma wiki", "spinach", "mchicha", "collards", "cabbage", "leafy greens", "sukuma"
-}
-
-ALTERNATIVES_KEYWORDS = {
-    "alternative", "alternatives", "instead", "other options", "others", "different", "swap", "substitute"
-}
-
 
 # ============================================================================
 # EAST AFRICAN RECIPE LIBRARY (Fallback Library)
@@ -432,118 +418,7 @@ def _apply_sw_aliases(text: str) -> str:
     return text
 
 
-def _infer_primary_ingredient(user_ingredients: Set[str], user_text: str) -> Optional[str]:
-    """Infer primary ingredient (usually protein) from user input."""
-    text = user_text.lower()
-    # Prefer explicit ingredient mentions from text in order
-    for protein in PROTEIN_INGREDIENTS:
-        if protein in text and protein in user_ingredients:
-            return protein
-
-    # Fallback to any protein ingredient present
-    for protein in PROTEIN_INGREDIENTS:
-        if protein in user_ingredients:
-            return protein
-
-    return None
-
-
-def _detect_leafy_green(user_ingredients: Set[str]) -> Optional[str]:
-    """Detect if the user has a leafy green (for cohesive meal pairing)."""
-    for green in LEAFY_GREENS:
-        if green in user_ingredients:
-            return green
-    return None
-
-
-def _asked_for_alternatives(user_text: str) -> bool:
-    """Check if the user explicitly requested alternatives."""
-    low = user_text.lower()
-    return any(word in low for word in ALTERNATIVES_KEYWORDS)
-
-
-def _generate_structured_recommendations(
-    results: List[Dict[str, Any]],
-    user_ingredients: Set[str],
-    primary_ingredient: Optional[str],
-    leafy_green: Optional[str]
-) -> List[Dict[str, str]]:
-    """Generate structured JSON recommendation list with origin labels."""
-    structured = []
-    seen = set()
-
-    # If user asks for protein + leafy green, prefer a combined meal pairing
-    if primary_ingredient and leafy_green:
-        main_recipe = None
-        side_recipe = None
-
-        for r in results:
-            name = r.get('meal_name', '')
-            if not name or name in seen:
-                continue
-
-            # Use matched info or recipe text to infer ingredients
-            matched = set(r.get('matched', []))
-            if isinstance(matched, list):
-                matched = set(matched)
-
-            # Prefer recipe with both primary and leafy green in matched set
-            if primary_ingredient in matched and leafy_green in matched and main_recipe is None:
-                main_recipe = r
-
-        if not main_recipe:
-            # Pick main by protein presence and highest coverage
-            for r in results:
-                matched = set(r.get('matched', []))
-                if primary_ingredient in matched and main_recipe is None:
-                    main_recipe = r
-                if leafy_green in matched and side_recipe is None:
-                    side_recipe = r
-            # If we found meat+green in one recipe, use as both
-            if main_recipe and leafy_green in set(main_recipe.get('matched', [])):
-                side_recipe = None
-
-        if main_recipe:
-            structured.append({
-                "dish_name": main_recipe.get("meal_name", "Unknown Dish"),
-                "origin": main_recipe.get("cuisine_region", "East Africa") or "East Africa"
-            })
-            seen.add(main_recipe.get("meal_name", ""))
-
-        if side_recipe and side_recipe.get('meal_name', '') not in seen:
-            structured.append({
-                "dish_name": side_recipe.get("meal_name", "Side Dish"),
-                "origin": side_recipe.get("cuisine_region", "East Africa") or "East Africa"
-            })
-
-    # Append top ranked results if we still need entries
-    for r in results:
-        if len(structured) >= 3:
-            break
-        name = r.get('meal_name', '')
-        origin = r.get('cuisine_region', '') or r.get('country', '') or "East Africa"
-        if name and name not in seen:
-            structured.append({"dish_name": name, "origin": origin})
-            seen.add(name)
-
-    # If we have protein + leafy green in user request, ensure we include a leafy green side
-    if primary_ingredient and leafy_green:
-        has_leafy = any(
-            leafy_green in str(r.get('matched', [])).lower() or leafy_green in str(r.get('meal_name', '')).lower()
-            for r in results
-        )
-        if not has_leafy and len(structured) > 0:
-            # Add traditional leafy green side if not already present
-            side_name = "Sukuma Wiki"
-            if all(s.get('dish_name') != side_name for s in structured):
-                structured.append({"dish_name": side_name, "origin": "Kenya"})
-
-    return structured
-
-
 def _generate_ngrams(tokens: List[str], n: int) -> List[str]:
-    """Generate n-grams from token list."""
-    return [" ".join(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
     """Generate n-grams from token list."""
     return [" ".join(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
 
@@ -595,24 +470,15 @@ def extract_user_ingredients(text: str) -> Set[str]:
     text = text.lower()
     text = re.sub(r"[^a-z\s]", " ", text)
     tokens = [t for t in text.split() if len(t) > 2]
-
+    
     # Generate candidate phrases (unigrams, bigrams, trigrams)
     candidates: Set[str] = set(tokens)
-
-    # Quick direct ingredient synonyms for important veggies/proteins missed by fuzzy matching
-    quick_add = {"kale", "sukuma wiki", "mchicha", "collards", "spinach", "beef", "chicken", "fish", "beans"}
-    for w in quick_add:
-        if w in text:
-            candidates.add(w)
     candidates.update(_generate_ngrams(tokens, 2))
     candidates.update(_generate_ngrams(tokens, 3))
     
     # Match each candidate against vocabulary
     matched_ingredients: Set[str] = set()
     for phrase in candidates:
-        # Direct fallback for high-priority ingredients
-        if phrase in {"kale", "sukuma wiki", "mchicha", "collards", "spinach", "chicken", "beef", "fish", "beans"}:
-            matched_ingredients.add(phrase)
         match = _fuzzy_match_one(phrase, INGREDIENT_VOCAB, threshold=Config.FUZZY_MATCH_THRESHOLD)
         if match is not None:
             matched_ingredients.add(match)
@@ -765,7 +631,6 @@ def _search_east_african_library(
     min_coverage: float = 0.33,
     top_n: int = 3,
     user_ingredients_original: Optional[Set[str]] = None,
-    primary_ingredient: Optional[str] = None,
     debug_log: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """
@@ -842,11 +707,7 @@ def _search_east_african_library(
         # Only include recipes meeting minimum coverage threshold
         if best_score < min_coverage:
             continue
-
-        # Enforce primary ingredient if requested
-        if primary_ingredient and primary_ingredient not in recipe_ingredients:
-            continue
-
+        
         # Find all missing ingredients
         missing = recipe_ingredients - best_matched
         
@@ -1229,76 +1090,68 @@ def rank_recipes(
     time_limit: Optional[int] = None,
     top_k: int = 5,
     religious_rules: Optional[List[str]] = None,
-    min_coverage: float = 0.5,
-    primary_ingredient: Optional[str] = None,
-    force_primary: bool = False,
-    allow_alternatives: bool = False
+    min_coverage: float = 0.5
 ) -> List[Dict[str, Any]]:
     """
     Score and rank recipes by ingredient coverage and time.
-
-    Adds strong primary ingredient enforcement and user-list utilization prioritization.
+    
+    CRITICAL: Only recommends recipes with coverage >= min_coverage (default 50%).
+    This prevents hallucinated recipes from being suggested when user lacks key ingredients.
+    
+    Coverage Formula:
+        coverage = matched_ingredients / recipe_total_ingredients
+    
+    A recipe is only considered if:
+        coverage >= 0.5 (user has at least 50% of recipe ingredients)
+    
+    Args:
+        user_ingredients: User's available ingredients
+        recipes_df: Recipe dataframe with features
+        time_limit: Optional max cooking time (minutes)
+        top_k: Number of top recipes to return
+        religious_rules: Optional list of religious rules to enforce
+        min_coverage: Minimum coverage threshold (default 0.5 = 50%)
+        
+    Returns:
+        List of ranked recipe dicts with scores (all with coverage >= min_coverage)
     """
     scored = []
-
-    if not user_ingredients:
-        return []
-
+    
     for rid in recipe_ingredient_map.keys():
         meta = recipes_df.loc[recipes_df["recipe_id"] == rid].iloc[0]
         cook_minutes = meta["cook_time_minutes"]
         recipe_name = meta["meal_name"]
         recipe_text = meta.get("recipes", "")
-
+        
         # Check religious rules
         if religious_rules and _recipe_has_forbidden_ingredient(recipe_name, recipe_text, religious_rules):
-            continue
-
+            continue  # Skip this recipe
+        
         # Time filter
         if time_limit is not None and cook_minutes > time_limit:
             continue
-
+        
         # Score recipe
         score_dict = _score_recipe(rid, user_ingredients)
         score_dict["cook_time_minutes"] = cook_minutes
         score_dict["meal_name"] = recipe_name
-
-        # Primary ingredient enforcement
-        if primary_ingredient and not allow_alternatives:
-            # Recipe must include primary ingredient directly in its ingredients
-            recipe_ings = recipe_ingredient_map.get(rid, set())
-            normalized_recipe_ings = set(_normalize_ingredient_form(ri) for ri in recipe_ings)
-            if primary_ingredient not in normalized_recipe_ings:
-                continue
-
+        
         # CRITICAL FILTERING: Only include recipes with sufficient coverage
         if score_dict["coverage"] < min_coverage:
-            continue
-
-        # Calculate user list utilization ratio
-        user_util_ratio = len(score_dict["matched"]) / len(user_ingredients)
-        score_dict["user_util_ratio"] = user_util_ratio
-
-        # Keep track of match quality for preference
-        score_dict["primary_match"] = (
-            primary_ingredient in score_dict["matched"] if primary_ingredient else False
-        )
-
+            continue  # Skip recipes below threshold
+        
         scored.append(score_dict)
-
-    # Sort using hierarchy: primary match, user utilization, coverage, fewer missing non-substitutable, cook time
+    
+    # Rank by coverage, then missing non-substitutable items, then cook time
     ranked = sorted(
         scored,
         key=lambda x: (
-            -int(x.get("primary_match", False)),
-            -x.get("user_util_ratio", 0),
             -x["coverage"],
             len(x["missing_without_sub"]),
             x["cook_time_minutes"]
         )
     )
-
-    # Ensure we return at most top_k
+    
     return ranked[:top_k]
 
 
@@ -1441,6 +1294,111 @@ def _recipe_has_forbidden_ingredient(recipe_name: str, recipe_text: str, religio
     return False
 
 
+def _format_recipe_suggestions(results: List[Dict[str, Any]], language: str = 'en') -> str:
+    """Format top recipe suggestions as conversational text."""
+    if language == 'sw':
+        header = "\nUnaweza kupika mojawapo ya vyakula hivi:\n\n"
+        footer = "\nUngependa ipi?"
+    else:
+        header = "\nHey there, you could try one of the following:\n\n"
+        footer = "\nWhich one would you like?"
+
+    lines = []
+    for idx, r in enumerate(results[:3], 1):
+        country = r.get('cuisine_region') or r.get('country') or ''
+        if country:
+            lines.append(f"{idx}. {r.get('meal_name', 'Unknown')} – {country}")
+        else:
+            lines.append(f"{idx}. {r.get('meal_name', 'Unknown')}")
+
+    if not lines:
+        return "I couldn't find recipe suggestions. Can you add or change one ingredient?"
+
+    return header + "\n".join(lines) + footer
+
+
+def _format_full_recipe(recipe_row: pd.Series) -> str:
+    """Build a full recipe text output in the requested format."""
+    recipe_name = str(recipe_row.get('meal_name', 'Unknown')).strip()
+    cuisine = str(recipe_row.get('cuisine_region', '') or recipe_row.get('country', '') or 'East Africa').strip().title()
+    core_ingredients = str(recipe_row.get('core_ingredients', '') or '').strip()
+    raw_steps = str(recipe_row.get('recipes', '') or '').strip()
+    notes = str(recipe_row.get('notes', '') or '').strip()
+
+    intro = f"\nGreat! Here's the recipe for {recipe_name}\n\n"
+    if notes:
+        intro += f"{notes}\n\n"
+    intro += f"Cuisine: {cuisine}\n\n"
+    intro += "Essential Ingredients\n\n"
+
+    if core_ingredients:
+        ingredients = [ing.strip() for ing in re.split(r'[,;\n]+', core_ingredients) if ing.strip()]
+        if not ingredients:
+            intro += "* (No ingredient list available)\n"
+        for ing in ingredients:
+            intro += f"* {ing}\n"
+    else:
+        intro += "* (No ingredients provided)\n"
+
+    intro += "\nStep-by-Step Cooking Instructions\n\n"
+    steps = []
+    if raw_steps:
+        # Split on newlines, arrows, and periods
+        pieces = re.split(r'[\n\r]+|→|\.|;|\d+\.', raw_steps)
+        for p in pieces:
+            p = p.strip()
+            if len(p) > 2:
+                steps.append(p)
+    if not steps:
+        steps = ["Follow the standard preparation: prepare ingredients, cook, and serve."]
+
+    for i, step in enumerate(steps[:8], 1):
+        sentence = step
+        if not sentence.endswith(('.', '!', '?')):
+            sentence += '.'
+        intro += f"{i}. {sentence}\n"
+
+    if notes:
+        intro += f"\nTips for Perfect {recipe_name}\n\n"
+        intro += f"* {notes}\n"
+
+    intro += "\nLet me know if you need any clarification on any step, or if you'd like to try something else!"
+    return intro
+
+
+def _extract_requested_recipe_name(user_text: str, recipes_df: pd.DataFrame) -> Optional[pd.Series]:
+    """Return a matching recipe row if the user text looks like a recipe selection request."""
+    text = re.sub(r"[^a-z0-9\s]", " ", user_text.lower()).strip()
+    if not text:
+        return None
+
+    # Exact or phrase match for known recipe names
+    for _, row in recipes_df.iterrows():
+        name = str(row.get('meal_name', '')).lower().strip()
+        if not name:
+            continue
+        name_norm = re.sub(r"[^a-z0-9\s]", " ", name)
+        if name_norm and (name_norm == text or f" {name_norm} " in f" {text} " or text.endswith(name_norm) or text.startswith(name_norm)):
+            return row
+
+    # Fallback: fuzzy match for short inputs
+    if len(text.split()) <= 4:
+        best_name = None
+        best_score = 0.0
+        for _, row in recipes_df.iterrows():
+            name = str(row.get('meal_name', '')).lower().strip()
+            if not name:
+                continue
+            score = SequenceMatcher(None, text, name).ratio()
+            if score > best_score:
+                best_score = score
+                best_name = row
+        if best_score >= 0.75 and best_name is not None:
+            return best_name
+
+    return None
+
+
 # ============================================================================
 # MAIN PIPELINE: RUN JEMA MODEL
 # ============================================================================
@@ -1488,21 +1446,36 @@ def run_jema_model(
     # Extract user ingredients - returns normalized set
     user_ingredients = extract_user_ingredients(user_text)
     log_debug(f"Extracted user ingredients: {sorted(list(user_ingredients))}")
-
+    
     # Normalize for library search (handle plurals, punctuation)
     user_ingredients_normalized = set(
         _normalize_ingredient_form(ing) for ing in user_ingredients
     )
     log_debug(f"Normalized user ingredients: {sorted(list(user_ingredients_normalized))}")
-
-    # Infer key constraints for recommendations
-    primary_ingredient = _infer_primary_ingredient(user_ingredients_normalized, user_text)
-    leafy_green = _detect_leafy_green(user_ingredients_normalized)
-    allow_alternatives = _asked_for_alternatives(user_text)
-
-    log_debug(f"Primary ingredient: {primary_ingredient}")
-    log_debug(f"Leafy green: {leafy_green}")
-    log_debug(f"Allow alternatives: {allow_alternatives}")
+    
+    # If user input looks like they named a recipe, return that recipe directly
+    requested_recipe = _extract_requested_recipe_name(user_text, recipes_df)
+    if requested_recipe is not None:
+        recipe_text = _format_full_recipe(requested_recipe)
+        recipe_data = {
+            "recipe_id": int(requested_recipe.get("recipe_id", -1)) if "recipe_id" in requested_recipe else -1,
+            "meal_name": requested_recipe.get("meal_name", ""),
+            "cuisine_region": requested_recipe.get("cuisine_region", requested_recipe.get("country", "")),
+            "core_ingredients": requested_recipe.get("core_ingredients", ""),
+            "recipes": requested_recipe.get("recipes", ""),
+            "cook_time_minutes": requested_recipe.get("cook_time_minutes", 0),
+            "notes": requested_recipe.get("notes", ""),
+        }
+        result = {
+            "language": language,
+            "user_ingredients": sorted(user_ingredients),
+            "pipeline_source": "direct_recipe",
+            "results": [recipe_data],
+            "conversation_text": recipe_text
+        }
+        if debug and debug_log:
+            result["debug"] = debug_log
+        return result
 
     # Extract time limit
     time_limit = extract_time_limit(user_text)
@@ -1520,15 +1493,12 @@ def run_jema_model(
     log_debug("=" * 60)
     
     ranked = rank_recipes(
-        user_ingredients,
-        recipes_df,
-        time_limit=time_limit,
+        user_ingredients, 
+        recipes_df, 
+        time_limit=time_limit, 
         top_k=top_k,
         religious_rules=religious_rules if religious_rules else None,
-        min_coverage=0.5,
-        primary_ingredient=primary_ingredient,
-        force_primary=bool(primary_ingredient and not allow_alternatives),
-        allow_alternatives=allow_alternatives
+        min_coverage=0.5  # Enforce 50% threshold
     )
     
     log_debug(f"CSV returned {len(ranked)} recipes")
@@ -1561,7 +1531,6 @@ def run_jema_model(
             min_coverage=0.33,  # Lenient threshold for library (33% vs CSV's 50%)
             top_n=top_k,
             user_ingredients_original=user_ingredients,  # Also try original for robustness
-            primary_ingredient=primary_ingredient,
             debug_log=debug_log  # Pass debug log to see matching details
         )
         
@@ -1664,22 +1633,9 @@ def run_jema_model(
             "is_groq_generated": r.get("is_groq_generated", False)
         })
     
-    # Build structured recipe recommendations (dish_name/origin)
-    structured_recommendations = _generate_structured_recommendations(
-        results,
-        user_ingredients,
-        primary_ingredient=primary_ingredient,
-        leafy_green=leafy_green
-    )
-
     # Build conversational message text for UI friendliness
     if results:
-        suggestion_lines = [f"{i+1}. {r['meal_name']}" for i, r in enumerate(results[:3])]
-        conversation_text = (
-            f"Hey there, you could try one of the following:\n" +
-            "\n".join(suggestion_lines) +
-            "\nWhich one would you like?"
-        )
+        conversation_text = _format_recipe_suggestions(results, language=language)
     else:
         conversation_text = "I couldn't find a recipe with those ingredients. Can you add or change one ingredient?"
 
@@ -1688,7 +1644,6 @@ def run_jema_model(
         "user_ingredients": sorted(user_ingredients_list),
         "pipeline_source": pipeline_source,
         "results": results,
-        "structured_recommendations": structured_recommendations,
         "conversation_text": conversation_text
     }
     
