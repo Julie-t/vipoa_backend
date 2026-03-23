@@ -5,7 +5,7 @@ from django.db import models
 class PoaPointsAccount(models.Model):
     """
     One wallet per user. This is the single source of truth for current balance.
-    """
+    """ 
     class Status(models.TextChoices):
         ACTIVE = "ACTIVE", "Active"
         LOCKED = "LOCKED", "Locked"

@@ -2,7 +2,7 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from .models import Profile
-from rewards.models import POAWallet
+from rewards.models.wallet import PoaPointsAccount
 from rewards.services.events import award_profile_completion
 
 User = get_user_model()
@@ -17,7 +17,7 @@ def ensure_profile_wallet(sender, instance, created, **kwargs):
     )
 
     # Ensure Wallet
-    POAWallet.objects.get_or_create(user=instance, defaults={"balance": 0})
+    PoaPointsAccount.objects.get_or_create(user=instance, defaults={"balance": 0})
 
 
 @receiver(post_save, sender=User)
