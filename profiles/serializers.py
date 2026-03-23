@@ -35,7 +35,12 @@ class ProfileReadSerializer(serializers.ModelSerializer):
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Profile
-        exclude = ["user", "day_streak", "profile_completed_awarded", "updated_at"]
+        exclude = [
+            "user",
+            "day_streak",
+            "profile_completed_awarded",
+            "updated_at",
+        ]
 
     def update(self, instance, validated_data):
         instance = super().update(instance, validated_data)
