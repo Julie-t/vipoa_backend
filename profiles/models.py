@@ -8,7 +8,6 @@ from django.utils import timezone
 
 from rewards.services.events import award_profile_completion
 from rewards.services.wallet import get_or_create_wallet
-
 from .constants import PROFILE_COMPLETION_FIELDS
 
 
@@ -22,7 +21,6 @@ class SupabaseUserManager(BaseUserManager):
     def _create_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError("Email is required")
-
         uid = extra_fields.get("id") or uuid.uuid4()
         email = self.normalize_email(email)
         user = self.model(id=uid, email=email, **extra_fields)
@@ -43,12 +41,10 @@ class SupabaseUserManager(BaseUserManager):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
         extra_fields.setdefault("is_active", True)
-
         if extra_fields.get("is_staff") is not True:
             raise ValueError("Superuser must have is_staff=True")
         if extra_fields.get("is_superuser") is not True:
             raise ValueError("Superuser must have is_superuser=True")
-
         return self._create_user(email=email, password=password, **extra_fields)
 
 
@@ -72,7 +68,7 @@ class SupabaseUser(AbstractBaseUser, PermissionsMixin):
         return self.email
 
 
-class Profile(models.Model): 
+class Profile(models.Model):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -126,8 +122,11 @@ class Profile(models.Model):
     # -----------------------------
     @property
     def poa_points(self):
-        wallet = get_or_create_wallet(self.user)
-        return wallet.balance
+        try:
+            wallet = get_or_create_wallet(self.user)
+            return wallet.balance if wallet else 0
+        except Exception:
+            return 0
 
     # -----------------------------
     # AGE
@@ -190,7 +189,9 @@ class Profile(models.Model):
             "moderate": 1.55,
             "very_active": 1.725,
         }
-        multiplier = activity_multipliers.get(self.activity_level.lower() if self.activity_level else "", 1.2)
+        multiplier = activity_multipliers.get(
+            self.activity_level.lower() if self.activity_level else "", 1.2
+        )
         return round(bmr * multiplier)
 
     # -----------------------------
