@@ -10,13 +10,10 @@ User = get_user_model()
 
 @receiver(post_save, sender=User)
 def ensure_profile_wallet(sender, instance, created, **kwargs):
-    # Ensure Profile
     Profile.objects.get_or_create(
         user=instance,
         defaults={"name": instance.full_name, "email": instance.email},
     )
-
-    # Ensure Wallet
     PoaPointsAccount.objects.get_or_create(user=instance, defaults={"balance": 0})
 
 
@@ -27,3 +24,14 @@ def sync_profile_identity(sender, instance, **kwargs):
         profile.name = instance.full_name
         profile.email = instance.email
         profile.save(update_fields=["name", "email"])
+
+
+@receiver(post_save, sender=Profile)
+def check_profile_completion(sender, instance: Profile, created, **kwargs):
+    if created:
+        return
+    if instance.profile_completed_awarded:
+        return
+    if instance.is_profile_complete():
+        award_profile_completion(user=instance.user)
+        Profile.objects.filter(pk=instance.pk).update(profile_completed_awarded=True)
