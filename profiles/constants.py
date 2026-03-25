@@ -15,6 +15,5 @@ PROFILE_COMPLETION_FIELDS = [
     "diet",
     "religion",
     "occupational_status",
-    "income_level",
     "region",
 ]
