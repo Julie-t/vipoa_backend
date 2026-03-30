@@ -12,6 +12,7 @@ from rewards.domain.keys import referral_milestone_key
 from rewards.models import PoaPointsTransaction, RewardClaim
 
 
+@override_settings(SECURE_SSL_REDIRECT=False)
 class ReferralApiTests(TestCase):
 	def setUp(self):
 		self.client = APIClient()
@@ -29,6 +30,19 @@ class ReferralApiTests(TestCase):
 		response = self.client.post(
 			self.create_url,
 			{"referral_code": self.referrer.profile.referral_code},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(Referral.objects.count(), 1)
+
+	def test_referral_creation_compat_prefix_success(self):
+		self._authenticate(self.referred)
+		compat_url = "/profiles/referral/create/"
+
+		response = self.client.post(
+			compat_url,
+			{"referral_code": self.referrer.profile.referral_code.lower()},
 			format="json",
 		)
 
@@ -102,7 +116,7 @@ class ReferralApiTests(TestCase):
 		self.assertEqual(response.data[0]["referral_count"], 2)
 
 
-@override_settings(REFERRAL_REWARD_MILESTONES={2: 10})
+@override_settings(REFERRAL_REWARD_MILESTONES={2: 10}, SECURE_SSL_REDIRECT=False)
 class ReferralRewardSignalTests(TestCase):
 	def setUp(self):
 		self.client = APIClient()
