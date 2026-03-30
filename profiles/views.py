@@ -84,7 +84,7 @@ class ReferralCreateView(APIView):
             return Response({"error": "Referral code is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            referrer_profile = Profile.objects.get(referral_code=referral_code)
+            referrer_profile = Profile.objects.get(referral_code__iexact=referral_code)
         except Profile.DoesNotExist:
             return Response({"error": "Invalid referral code."}, status=status.HTTP_404_NOT_FOUND)
 

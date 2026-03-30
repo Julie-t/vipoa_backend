@@ -49,6 +49,7 @@ urlpatterns = [
     path("api/reviews/", include("reviews.urls")),
     path("api/products/", include("products.urls")),
     path("api/profiles/", include("profiles.urls")),
+    path("profiles/", include("profiles.urls")),
     path("api/poa-points/", include("rewards.urls")),  # alias
     path("api/rewards/", include("rewards.urls")),     # canonical
     path("api/surveys/", include(("surveys.urls", "surveys"), namespace="surveys")),

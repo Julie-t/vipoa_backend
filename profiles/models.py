@@ -233,7 +233,18 @@ class Referral(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("referrer", "referred_user")
+        constraints = [
+            models.UniqueConstraint(fields=["referrer", "referred_user"], name="uq_referral_referrer_referred"),
+            models.UniqueConstraint(fields=["referred_user"], name="uq_referral_referred_once"),
+            models.CheckConstraint(
+                check=~models.Q(referrer=models.F("referred_user")),
+                name="ck_referral_not_self",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["referrer", "created_at"]),
+            models.Index(fields=["referred_user"]),
+        ]
         ordering = ["-created_at"]
 
     def __str__(self):
