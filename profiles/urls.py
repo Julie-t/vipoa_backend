@@ -22,6 +22,5 @@ urlpatterns = [
     path("referral/create/", ReferralCreateView.as_view(), name="referral-create"),
     path("referral/count", ReferralCountView.as_view()),
     path("referral/count/", ReferralCountView.as_view(), name="referral-count"),
-    path("referral/leaderboard", ReferralLeaderboardView.as_view()),
     path("referral/leaderboard/", ReferralLeaderboardView.as_view(), name="referral-leaderboard"),
 ]
