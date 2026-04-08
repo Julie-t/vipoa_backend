@@ -22,11 +22,9 @@ RUN pip install -r requirements.txt
 # Copy project files
 COPY . .
 
-# Collect static files
-RUN python manage.py collectstatic --noinput
-
 # Expose the port Railway expects
 EXPOSE 8080
 
-# Run migrations, create superuser (via custom command), and start Gunicorn
-CMD ["sh", "-c", "python manage.py migrate && gunicorn vipoa_backend.wsgi:application --bind 0.0.0.0:$PORT"]
+# Collect static files, run migrations, and start Gunicorn at runtime so that
+# Railway's environment variables (SECRET_KEY, DATABASE_URL, etc.) are available.
+CMD ["sh", "-c", "python manage.py collectstatic --noinput && python manage.py migrate && gunicorn vipoa_backend.wsgi:application --bind 0.0.0.0:$PORT"]
