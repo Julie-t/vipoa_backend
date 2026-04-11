@@ -153,6 +153,28 @@ def split_steps_paragraph(paragraph: str) -> list:
     return steps
 
 
+# Tokens that indicate a phrase is NOT a recipe name (occasions, times, quantities, connectors)
+INVALID_RECIPE_NAME_TOKENS = {
+    # Islamic occasions
+    "eid", "eid al-fitr", "eid al-adha", "ramadan", "iftar", "suhoor",
+    "maulid", "jumuah", "friday", "halal",
+    # General occasions
+    "christmas", "easter", "diwali", "passover", "thanksgiving",
+    "celebration", "occasion", "special", "party", "wedding", "birthday",
+    # Time of day / meal slots
+    "breakfast", "lunch", "dinner", "supper", "brunch", "snack",
+    "morning", "afternoon", "evening", "tonight", "today", "tomorrow",
+    # Quantity and filler words
+    "1", "2", "3", "4", "5", "one", "two", "three", "four", "five",
+    "some", "few", "many", "multiple", "several", "couple",
+    "meal", "meals", "dish", "dishes", "recipe", "recipes",
+    "option", "options", "idea", "ideas", "suggestion", "suggestions",
+    # Prepositions / connectors that indicate a phrase not a name
+    "for", "after", "before", "during", "at", "on", "in", "with",
+    "from", "about", "to", "of", "that", "which", "what", "something"
+}
+
+
 class JemaEngine:
     """
     Central orchestrator for Jema conversations.
@@ -312,32 +334,132 @@ class JemaEngine:
         # Regional diversity tracking (prevent repetition from same region)
         self.suggested_regions: List[str] = []  # Track regions of suggested recipes in this session
 
-    def _lookup_csv_recipe(self, recipe_name: str) -> Optional[Dict]:
+    def _filter_csv_by_profile(self, df: pd.DataFrame, user_profile: dict = None) -> pd.DataFrame:
         """
-        Look up a recipe in the CSV database.
+        Filter DataFrame to exclude recipes that violate user dietary restrictions.
+        This is called FIRST before any recipe selection to prevent unsafe suggestions.
+        
+        Handles:
+        - Vegan/vegetarian diets (excludes all meat, fish, dairy, eggs, honey)
+        - Muslim/halal (excludes pork, alcohol)
+        - Hindu (excludes beef)
+        - Allergies (nuts, dairy, gluten)
+        - Dislikes
+        
+        Args:
+            df: DataFrame to filter (typically self.recipes_df)
+            user_profile: Dict with keys: diet, allergies, religion, dislikes, medical_conditions
+            
+        Returns:
+            Filtered DataFrame. Returns original if no profile provided or no safe recipes found.
+        """
+        if not user_profile or df.empty:
+            return df
+        
+        filtered = df.copy()
+        diet = str(user_profile.get("diet", "")).lower().strip()
+        allergies = user_profile.get("allergies") or []
+        if isinstance(allergies, str):
+            allergies = [allergies]
+        allergies = [a.lower().strip() for a in allergies]
+        
+        dislikes = user_profile.get("dislikes") or []
+        if isinstance(dislikes, str):
+            dislikes = [dislikes]
+        dislikes = [d.lower().strip() for d in dislikes]
+        
+        religion = str(user_profile.get("religion", "")).lower().strip()
+
+        # Build forbidden ingredient list from profile
+        forbidden = set()
+        
+        # Diet-based restrictions
+        if diet in ("vegan", "vegetarian", "hindu_vegetarian"):
+            forbidden.update(["chicken", "beef", "lamb", "mutton", "pork", "fish", "prawn", "shrimp",
+                              "meat", "bacon", "lard", "gelatin"])
+        if diet == "vegan":
+            forbidden.update(["dairy", "milk", "cheese", "butter", "cream", "ghee", "yogurt", "honey", "egg", "eggs"])
+        elif diet == "vegetarian":
+            forbidden.update(["dairy", "milk", "cheese", "butter", "cream", "ghee", "yogurt"])
+        
+        # Religion-based restrictions
+        if "muslim" in religion or "halal" in religion:
+            forbidden.update(["pork", "bacon", "ham", "lard", "alcohol", "wine", "beer", "spirits"])
+        if "hindu" in religion:
+            forbidden.update(["beef", "veal"])
+        
+        # Allergy-based restrictions
+        for allergy in allergies:
+            if "nut" in allergy.lower():
+                forbidden.update(["almond", "almonds", "cashew", "cashews", "peanut", "peanuts",
+                                  "walnut", "walnuts", "pistachio", "pistachios", "hazelnut",
+                                  "hazelnuts", "pecan", "pecans", "nut", "nuts", "groundnut", "groundnuts"])
+            elif "dairy" in allergy.lower():
+                forbidden.update(["milk", "cheese", "butter", "cream", "yogurt", "ghee", "lactose", "dairy"])
+            elif "gluten" in allergy.lower():
+                forbidden.update(["wheat", "flour", "bread", "pasta", "barley", "rye", "semolina", "gluten"])
+            elif "egg" in allergy.lower():
+                forbidden.update(["egg", "eggs", "eggs"])
+        
+        # Add user dislikes
+        forbidden.update(dislikes)
+        
+        # Filter rows: exclude if core_ingredients contains any forbidden item
+        def row_is_safe(row):
+            ingredients_raw = str(row.get("core_ingredients", "")).lower()
+            for item in forbidden:
+                if re.search(r'\b' + re.escape(item) + r'\b', ingredients_raw):
+                    return False
+            return True
+        
+        safe_mask = filtered.apply(row_is_safe, axis=1)
+        filtered = filtered[safe_mask]
+        
+        # If filtering leaves fewer than 3 rows, apply a partial filter
+        # (only enforce religion + allergies, drop dislikes)
+        if len(filtered) < 3:
+            partial_forbidden = forbidden - set(dislikes)
+            safe_mask2 = df.apply(lambda row: all(
+                not re.search(r'\b' + re.escape(item) + r'\b', str(row.get("core_ingredients", "")).lower())
+                for item in partial_forbidden
+            ), axis=1)
+            filtered = df[safe_mask2]
+        
+        # Last resort: return original df rather than empty
+        return filtered if len(filtered) > 0 else df
+
+    def _lookup_csv_recipe(self, recipe_name: str, df: pd.DataFrame = None) -> Optional[Dict]:
+        """
+        Look up a recipe in the CSV database (already filtered by profile if applicable).
         
         Matching strategy:
         1. Exact match (case-insensitive, whitespace trimmed)
         2. Compound meal detection
         3. Close match with guards (cutoff 0.8, length/word checks)
         
+        Args:
+            recipe_name: Name of recipe to look up
+            df: Optional pre-filtered DataFrame (filtered by profile). Defaults to self.recipes_df.
+        
         Returns the recipe dict (with all CSV columns) if found, None otherwise.
         """
-        if not recipe_name or self.recipes_df.empty:
+        search_df = df if df is not None else self.recipes_df
+        
+        if not recipe_name or search_df.empty:
             return None
         
         query_lower = recipe_name.strip().lower()
-        meal_names = self.recipes_df['meal_name'].dropna().tolist()
+        meal_names = search_df['meal_name'].dropna().tolist()
         meal_names_lower = [name.strip().lower() for name in meal_names]
         
         # Priority 1: Exact full name match (case-insensitive, whitespace stripped)
-        for idx, row in self.recipes_df.iterrows():
+        for idx, row in search_df.iterrows():
             if str(row.get('meal_name', '')).strip().lower() == query_lower:
                 matched_row = row.to_dict()
                 return matched_row
         
-        # Priority 2: Compound meal detection
-        compound = self.detect_compound_meal(recipe_name, self.recipes_df)
+        # Priority 2: Compound meal detection (pass filtered df)
+        compound = self.detect_compound_meal(recipe_name, search_df)
         if compound:
             return compound
         
@@ -362,7 +484,7 @@ class JemaEngine:
 
             # Find and return the actual row
             original_idx = meal_names_lower.index(matched_lower)
-            matched_row = self.recipes_df.iloc[original_idx].to_dict()
+            matched_row = search_df.iloc[original_idx].to_dict()
             return matched_row
 
         return None
@@ -404,15 +526,20 @@ class JemaEngine:
 
         return None
 
-    def _csv_search_by_ingredient(self, ingredient: str, count: int) -> list:
+    def _csv_search_by_ingredient(self, ingredient: str, count: int, user_profile: dict = None) -> list:
         """
         Search the CSV for recipes whose core_ingredients contain the given ingredient.
         Returns up to `count` matching recipe dicts.
+        
+        IMPORTANT: Now applies user_profile filtering FIRST before search.
         """
+        # FILTER 1: Apply dietary profile restrictions FIRST
+        safe_df = self._filter_csv_by_profile(self.recipes_df, user_profile)
+        
         ingredient_lower = ingredient.strip().lower()
         matches = []
 
-        for idx, row in self.recipes_df.iterrows():
+        for idx, row in safe_df.iterrows():
             core = str(row.get('core_ingredients', '')).lower()
             if ingredient_lower in core:
                 matches.append({
@@ -425,17 +552,22 @@ class JemaEngine:
 
         return matches
 
-    def _lookup_with_modifier(self, recipe_name: str) -> tuple:
+    def _lookup_with_modifier(self, recipe_name: str, df: pd.DataFrame = None) -> tuple:
         """
         Returns (row, modifier) where modifier is the variant requested.
         e.g. "Fish Pepper Soup" → (pepper_soup_row, "fish")
         
+        Args:
+            recipe_name: Name of recipe to look up (may include modifier prefix)
+            df: Optional pre-filtered DataFrame (filtered by profile). Defaults to self.recipes_df.
+        
         Returns (None, None) if no match found.
         """
+        search_df = df if df is not None else self.recipes_df
         query_lower = recipe_name.strip().lower()
 
         # Try exact match first
-        for idx, row in self.recipes_df.iterrows():
+        for idx, row in search_df.iterrows():
             if str(row.get('meal_name', '')).strip().lower() == query_lower:
                 return row, None
 
@@ -450,7 +582,7 @@ class JemaEngine:
             for modifier in common_modifiers:
                 if words[0] == modifier:
                     base_name = ' '.join(words[1:])
-                    for idx, row in self.recipes_df.iterrows():
+                    for idx, row in search_df.iterrows():
                         if str(row.get('meal_name', '')).strip().lower() == base_name:
                             return row, modifier
 
@@ -592,9 +724,13 @@ class JemaEngine:
     def _handle_community_request(self, user_input: str, community: str, user_profile: dict = None) -> Dict:
         """Handle requests for specific community/ethnic cuisines."""
         community_matcher = self.matcher.filter_by_community(community).exclude_beverages()
-        all_community_recipes = self.recipes_df[
-            self.recipes_df['community'].str.lower() == community.lower()
-        ] if 'community' in self.recipes_df.columns else pd.DataFrame()
+        
+        # FILTER 1: Apply dietary profile restrictions FIRST
+        safe_df = self._filter_csv_by_profile(self.recipes_df, user_profile)
+        
+        all_community_recipes = safe_df[
+            safe_df['community'].str.lower() == community.lower()
+        ] if 'community' in safe_df.columns else pd.DataFrame()
         
         if not all_community_recipes.empty:
             top_recipes = all_community_recipes.head(5)
@@ -658,9 +794,12 @@ class JemaEngine:
         if self.last_suggested_recipes:
             self.rejected_recipes.extend([r.get('meal_name', '') for r in self.last_suggested_recipes[:1]])
             
+            # FILTER 1: Apply dietary profile restrictions FIRST
+            safe_df = self._filter_csv_by_profile(self.recipes_df, user_profile)
+            
             # Find alternatives
             alternatives = []
-            for idx, recipe in self.recipes_df.iterrows():
+            for idx, recipe in safe_df.iterrows():
                 if recipe.get('meal_name', '') not in self.rejected_recipes:
                     alternatives.append(recipe)
                 if len(alternatives) >= 3:
@@ -780,10 +919,44 @@ class JemaEngine:
         elif "dinner" in user_input.lower():
             meal_time = "dinner"
         
-        time_context = f" for {meal_time}" if meal_time else ""
-        prompt = f"Suggest 3-4 delicious traditional African recipes{time_context} from across the continent. Include the dish name and a brief description of why it's great. Keep it conversational and appetizing."
+        # Extract quantity requested (e.g., "3 meals", "suggest 3", "two recipes")
+        quantity = self._extract_quantity(user_input)
         
-        response = self.llm.general_response(prompt, use_history=False, include_cta=False, user_profile=user_profile)
+        time_context = f" for {meal_time}" if meal_time else ""
+        
+        # When quantity > 1, generate structured suggestions and format as numbered list
+        if quantity > 1:
+            # Generate suggestions in a structured way, one per numbered item
+            prompt = f"Suggest {quantity} delicious traditional African recipes{time_context} from across the continent. Return ONLY a numbered list (1. 2. 3. etc) with the dish name and a brief one-line description. No additional text."
+            
+            raw_response = self.llm.general_response(prompt, use_history=False, include_cta=False, user_profile=user_profile)
+            
+            # Parse the response into individual suggestions
+            # Split by lines and extract numbered items
+            suggestions = []
+            for line in raw_response.split('\n'):
+                line = line.strip()
+                if line and line[0].isdigit():  # Line starts with a number (e.g., "1.")
+                    # Remove leading number and period (e.g., "1. " or "1)")
+                    suggestion = re.sub(r'^\d+[\.\)]\s*', '', line).strip()
+                    if suggestion:
+                        suggestions.append(suggestion)
+            
+            # If parsing didn't work well, fall back to splitting by newlines
+            if len(suggestions) < quantity:
+                suggestions = [s.strip() for s in raw_response.split('\n') if s.strip() and len(s.strip()) > 3][:quantity]
+            
+            # Format as numbered list
+            formatted_results = []
+            for i, suggestion in enumerate(suggestions[:quantity], 1):
+                formatted_results.append(f"{i}. {suggestion}")
+            
+            response = f"Here are {quantity} suggestions:\n\n" + "\n\n".join(formatted_results)
+        else:
+            # Single suggestion — use conversational prompt
+            prompt = f"Suggest a delicious traditional African recipe{time_context} from across the continent. Include the dish name and a brief description of why it's great. Keep it conversational and appetizing."
+            response = self.llm.general_response(prompt, use_history=False, include_cta=False, user_profile=user_profile)
+        
         self.llm.add_to_history("user", user_input)
         self.llm.add_to_history("assistant", response)
         
@@ -791,8 +964,11 @@ class JemaEngine:
 
     def _handle_information(self, user_input: str, user_profile: dict = None) -> Dict:
         """Handle information/social chat."""
+        # Filter DataFrame by profile first
+        safe_df = self._filter_csv_by_profile(self.recipes_df, user_profile)
+        
         # Check if this might be a recipe request that wasn't caught by RECIPE_REQUEST intent
-        recipe_name = self._extract_recipe_name(user_input)
+        recipe_name = self._extract_recipe_name(user_input, df=safe_df)
         if recipe_name:
             # Route to recipe handler
             return self._handle_recipe_request(user_input, user_profile)
@@ -803,7 +979,7 @@ class JemaEngine:
         
         return self._build_response(response, [])
 
-    def _extract_recipe_name(self, user_input: str) -> str:
+    def _extract_recipe_name(self, user_input: str, df: pd.DataFrame = None) -> str:
         """
         Extract recipe name from a direct recipe request.
 
@@ -813,7 +989,12 @@ class JemaEngine:
         - "How to make ugali"
         - "Recipe for biryani"
         - "How can I cook matoke?"
+        
+        Args:
+            user_input: User input string
+            df: Optional pre-filtered DataFrame (filtered by profile). Defaults to self.recipes_df.
         """
+        search_df = df if df is not None else self.recipes_df
         query = user_input.lower().strip()
 
         # Remove common request prefixes — longest first to avoid partial matches
@@ -844,11 +1025,11 @@ class JemaEngine:
                 # Remove trailing punctuation and filler words
                 name = re.sub(r'[?!.,;:\'"]+$', '', name).strip()
                 name = re.sub(r'\s+', ' ', name).strip()
-                if name and len(name) > 1:
+                if name and len(name) > 1 and self.is_valid_recipe_name(name):
                     return name.title()
 
-        # Fallback — check if any known recipe name appears in the query
-        for _, row in self.recipes_df.iterrows():
+        # Fallback — check if any known recipe name appears in the query (from filtered df)
+        for _, row in search_df.iterrows():
             meal_name = str(row.get('meal_name', '')).lower()
             if meal_name and meal_name in query:
                 return str(row.get('meal_name', '')).title()
@@ -868,8 +1049,11 @@ class JemaEngine:
         3. Tavily web search
         4. Groq generation (constrained)
         """
+        # CRITICAL: Filter DataFrame by profile FIRST to prevent serving unsafe recipes
+        safe_df = self._filter_csv_by_profile(self.recipes_df, user_profile)
+        
         # Extract recipe name from the request
-        recipe_name = self._extract_recipe_name(user_input)
+        recipe_name = self._extract_recipe_name(user_input, df=safe_df)
 
         if not recipe_name:
             response = self.llm.general_response(
@@ -890,8 +1074,9 @@ class JemaEngine:
 
         # ─────────────────────────────────────────────────────────────────────────────
         # STEP 1: Try CSV lookup first (authoritative source)
+        # (DataFrame already filtered by profile above)
         # ─────────────────────────────────────────────────────────────────────────────
-        csv_recipe, variant_modifier = self._lookup_with_modifier(recipe_name)
+        csv_recipe, variant_modifier = self._lookup_with_modifier(recipe_name, df=safe_df)
         
         try:
             if csv_recipe is not None:
@@ -997,6 +1182,9 @@ class JemaEngine:
 
     def _handle_ingredient_based(self, user_input: str, constraints: List, user_profile: dict = None) -> Dict:
         """Handle ingredient-based recipe matching across African cuisines with deduplication."""
+        # FILTER 1: Apply dietary profile restrictions FIRST (before any CSV search)
+        safe_df = self._filter_csv_by_profile(self.recipes_df, user_profile)
+        
         # Extract ingredients
         user_ingredients = IngredientNormalizer.extract_from_string(user_input)
         
@@ -1039,10 +1227,10 @@ class JemaEngine:
         # Try direct search for primary ingredients first
         for ingredient in normalized_ingredients:
             if ingredient in PRIMARY_INGREDIENTS:
-                direct_matches = self._csv_search_by_ingredient(ingredient, count=10)
+                direct_matches = self._csv_search_by_ingredient(ingredient, count=10, user_profile=user_profile)
                 for match in direct_matches:
-                    # Fetch full recipe row from CSV
-                    recipe_row = self.recipes_df[self.recipes_df['meal_name'] == match['meal_name']]
+                    # Fetch full recipe row from safe_df (filtered by profile)
+                    recipe_row = safe_df[safe_df['meal_name'] == match['meal_name']]
                     if not recipe_row.empty:
                         row = recipe_row.iloc[0]
                         full_recipe = {
@@ -1071,9 +1259,9 @@ class JemaEngine:
             if self.rejected_recipes:
                 matches = [m for m in matches if m.name not in self.rejected_recipes]
             
-            # Get raw CSV results — convert to dicts immediately
+            # Get raw CSV results — convert to dicts immediately (from safe_df)
             for match in matches:
-                recipe_row = self.recipes_df[self.recipes_df['meal_name'] == match.name]
+                recipe_row = safe_df[safe_df['meal_name'] == match.name]
                 if not recipe_row.empty:
                     row = recipe_row.iloc[0]
                     full_recipe = {
@@ -1295,8 +1483,11 @@ class JemaEngine:
 
         return self._build_response(output, all_recipes)
 
-    def _handle_no_matches(self, user_ingredients: set, matcher, user_constraints: Dict, user_input: str) -> Dict:
+    def _handle_no_matches(self, user_ingredients: set, matcher, user_constraints: Dict, user_input: str, user_profile: dict = None) -> Dict:
         """Handle when no recipes match user ingredients."""
+        # Filter DataFrame by profile first
+        safe_df = self._filter_csv_by_profile(self.recipes_df, user_profile)
+        
         # First, check common recipes fallback
         common_matches = self._match_common_recipes(user_ingredients)
         
@@ -1348,8 +1539,9 @@ class JemaEngine:
             message += "\n\nInterested in any of these?"
             
             self.last_suggested_recipes = [
-                self.recipes_df[self.recipes_df['meal_name'] == m.name].iloc[0].to_dict()
+                safe_df[safe_df['meal_name'] == m.name].iloc[0].to_dict()
                 for m in near_matches[:3]
+                if not safe_df[safe_df['meal_name'] == m.name].empty
             ]
             self.awaiting_recipe_choice = True
             
@@ -1381,8 +1573,11 @@ class JemaEngine:
 
     def _handle_fallback(self, user_input: str, user_profile: dict = None) -> Dict:
         """Handle unrecognized intents."""
+        # Filter DataFrame by profile first
+        safe_df = self._filter_csv_by_profile(self.recipes_df, user_profile)
+        
         # Check if this might be a recipe request
-        recipe_name = self._extract_recipe_name(user_input)
+        recipe_name = self._extract_recipe_name(user_input, df=safe_df)
         if recipe_name:
             # Route to recipe handler
             return self._handle_recipe_request(user_input, user_profile)
@@ -1838,6 +2033,69 @@ Format as plain text, no markdown. Be specific with measurements and timing."""
                 accuracy -= 40
             accuracy = max(0, min(100, accuracy))
             total_score += accuracy
+
+    def is_valid_recipe_name(self, candidate: str) -> bool:
+        """
+        Validate if a candidate string is a valid recipe name.
+        Rejects names that are mostly occasion words, time words, quantities, or prepositions.
+        
+        Args:
+            candidate: String to validate as a recipe name
+            
+        Returns:
+            True if candidate appears to be a real recipe name, False if it's a phrase like "For Eid"
+        """
+        if not candidate or len(candidate.strip()) < 2:
+            return False
+        
+        candidate_lower = candidate.lower().strip()
+        tokens = candidate_lower.split()
+        
+        if not tokens:
+            return False
+        
+        # Check if > 40% of tokens are invalid (occasions, times, quantities, etc.)
+        invalid_count = sum(1 for t in tokens if t in INVALID_RECIPE_NAME_TOKENS)
+        if len(tokens) > 0:
+            if invalid_count / len(tokens) >= 0.4:
+                return False
+        
+        # Reject if starts with a preposition or occasion word
+        first_word = tokens[0] if tokens else ""
+        LEADING_INVALIDS = {"for", "with", "from", "after", "before", "during", 
+                            "at", "on", "in", "of", "to", "about", "suggest", 
+                            "give", "make", "cook", "what", "some", "any"}
+        if first_word in LEADING_INVALIDS:
+            return False
+        
+        return True
+    
+    def _extract_quantity(self, message: str) -> int:
+        """
+        Extract the quantity (number of meals) requested from a message.
+        Handles patterns like "3 meals", "suggest 3", "two recipes", etc.
+        
+        Args:
+            message: User message to scan for quantity
+            
+        Returns:
+            Quantity as int (1-5), defaults to 1 if not found
+        """
+        word_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                    "a few": 3, "couple": 2, "some": 3}
+        msg = message.lower().strip()
+        
+        # Check for digits first (e.g., "3 meals", "suggest 3")
+        digit_match = re.search(r'\b([1-5])\b', msg)
+        if digit_match:
+            return int(digit_match.group(1))
+        
+        # Check word forms (longest first to avoid partial matches)
+        for word in sorted(word_map.keys(), key=len, reverse=True):
+            if word in msg:
+                return word_map[word]
+        
+        return 1
 
     def get_state(self) -> Dict:
         """Get current conversation state (for debugging/persistence)."""

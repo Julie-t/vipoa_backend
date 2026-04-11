@@ -139,23 +139,35 @@ def chat(request):
             user_profile=user_profile,
         )
         
-        # Optionally persist to database
-        if session_id:
-            try:
-                session = ChatSession.objects.get(id=session_id)
-                ChatMessage.objects.create(
-                    session=session,
-                    role='user',
-                    content=user_message
-                )
-                ChatMessage.objects.create(
-                    session=session,
-                    role='assistant',
-                    content=response.get('message', '')
-                )
-            except ChatSession.DoesNotExist:
-                logger.warning(f"ChatSession {session_id} not found")
-        
+        # Always persist to database so the first-interaction signal fires
+        try:
+            if session_id:
+                try:
+                    session = ChatSession.objects.get(id=session_id)
+                except ChatSession.DoesNotExist:
+                    logger.warning(f"ChatSession {session_id} not found, creating new session")
+                    session = ChatSession.objects.create(user_id=user_id)
+                    session_id = session.id
+            else:
+                session = ChatSession.objects.create(user_id=user_id)
+                session_id = session.id
+
+            ChatMessage.objects.create(
+                session=session,
+                role='user',
+                content=user_message
+            )
+            ChatMessage.objects.create(
+                session=session,
+                role='assistant',
+                content=response.get('message', '')
+            )
+        except Exception as e:
+            logger.error(f"Failed to persist chat messages: {e}")
+
+        # Always return session_id so the frontend can track the session
+        response['session_id'] = session_id
+
         return Response(response, status=status.HTTP_200_OK)
 
     except Exception as e:
