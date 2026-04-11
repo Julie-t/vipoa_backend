@@ -149,6 +149,10 @@ def chat(request):
             if session_id:
                 try:
                     session = ChatSession.objects.get(id=session_id)
+                    # Backfill user_id on sessions created before the fix (user_id=None)
+                    if session.user_id is None and resolved_user_id is not None:
+                        session.user_id = resolved_user_id
+                        session.save(update_fields=["user_id"])
                 except ChatSession.DoesNotExist:
                     logger.warning(f"ChatSession {session_id} not found, creating new session")
                     session = ChatSession.objects.create(user_id=resolved_user_id)
