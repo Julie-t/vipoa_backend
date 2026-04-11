@@ -85,6 +85,7 @@ INSTALLED_APPS = [
     "drf_yasg",
 
     # Local Apps
+    "vipoa_backend",
     "jema.apps.JemaConfig",
     "products",
     "reviews",
